@@ -153,6 +153,63 @@ export default function MabelHairArt() {
   const [newLeave, setNewLeave] = useState({ staffId: data.staff[0]?.id || "mabel", startDate: todayISO(0), endDate: todayISO(0), reason: "İzin" });
   const [newBlock, setNewBlock] = useState({ staffId: "all", date: todayISO(0), startTime: "12:00", endTime: "13:00", reason: "Kapalı" });
 
+  function normalizeAppointmentRow(a) {
+    return {
+      id: a.id,
+      customerName: a.customer_name || "",
+      phone: a.phone || "",
+      serviceId: a.service || "sac",
+      staffId: a.staff_key || "mabel",
+      date: a.appointment_date,
+      time: a.appointment_time,
+      note: a.note || "",
+      status: a.status || "active",
+      paidAmount: Number(a.paid_amount || 0),
+      remainingDebt: Number(a.remaining_debt || 0),
+      paymentStatus: a.payment_status || "pending",
+    };
+  }
+
+  async function loadRemoteAppointments() {
+    const { data: rows, error } = await supabase
+      .from("appointments")
+      .select("*")
+      .order("appointment_date", { ascending: true })
+      .order("appointment_time", { ascending: true });
+
+    if (error) {
+      console.log("Appointments load error:", error);
+      return;
+    }
+
+    if (rows) {
+      setData((d) => ({
+        ...d,
+        appointments: rows.map(normalizeAppointmentRow),
+      }));
+    }
+  }
+
+  useEffect(() => {
+    loadRemoteAppointments();
+
+    const timer = setInterval(loadRemoteAppointments, 5000);
+
+    const channel = supabase
+      .channel("appointments-live")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "appointments" },
+        () => loadRemoteAppointments()
+      )
+      .subscribe();
+
+    return () => {
+      clearInterval(timer);
+      supabase.removeChannel(channel);
+    };
+  }, []);
+
   useEffect(() => localStorage.setItem(LS_KEY, JSON.stringify(data)), [data]);
 
   const serviceMap = useMemo(() => Object.fromEntries(data.services.map((s) => [s.id, s])), [data.services]);
@@ -235,19 +292,21 @@ export default function MabelHairArt() {
       .from("appointments")
       .insert([
         {
-  customer_name: payload.customerName,
-  phone: normPhone(payload.phone),
-  service: payload.serviceId,
-  appointment_date: payload.date,
-  appointment_time: payload.time,
-  staff_id: null,
-  note: payload.note || "",
-  status: "active",
-  paid_amount: 0,
-  remaining_debt: 0,
-  payment_status: "pending",
-},
-      ]);
+          customer_name: payload.customerName,
+          phone: normPhone(payload.phone),
+          service: payload.serviceId,
+          appointment_date: payload.date,
+          appointment_time: payload.time,
+          staff_key: payload.staffId || "mabel",
+          staff_id: null,
+          note: payload.note || "",
+          status: "active",
+          paid_amount: 0,
+          remaining_debt: 0,
+          payment_status: "pending",
+        },
+      ])
+      .select();
 
     console.log("Supabase data:", insertedData);
     console.log("Supabase error:", error);
@@ -263,7 +322,7 @@ export default function MabelHairArt() {
         ...d.appointments,
         {
           ...payload,
-          id: id(),
+          id: insertedData?.[0]?.id || id(),
           phone: normPhone(payload.phone),
           status: "active",
           paidAmount: 0,
@@ -271,6 +330,8 @@ export default function MabelHairArt() {
         },
       ],
     }));
+
+    loadRemoteAppointments();
 
     return true;
   }
@@ -480,7 +541,7 @@ export default function MabelHairArt() {
 
                 <div>
                   <h3 className="mb-3 flex items-center gap-2 font-semibold"><CalendarDays className="h-5 w-5 text-amber-300" /> Tarih Seç</h3>
-                  <Input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="w-full md:w-72" />
+                  <Input type="date" min={todayISO(0)} value={date} onChange={(e) => setDate(e.target.value)} className="w-full md:w-72" />
                 </div>
 
                 <div>
