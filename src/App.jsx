@@ -87,21 +87,7 @@ function loadData() {
       staffLeaves: [],
       blockedSlots: [],
       customerAccounts: [],
-      appointments: [
-        {
-          id: id(),
-          customerName: "Ahmet Kutucu",
-          phone: "905551112233",
-          serviceId: "sac-sakal",
-          staffId: "mabel",
-          date: todayISO(0),
-          time: "15:00",
-          note: "",
-          status: "active",
-          paidAmount: 0,
-          remainingDebt: 0,
-        },
-      ],
+      appointments: [],
     };
   }
 }
@@ -126,6 +112,7 @@ function Status({ value }) {
 
 export default function MabelHairArt() {
   const [data, setData] = useState(loadData);
+  const [remoteReady, setRemoteReady] = useState(false);
   const [view, setView] = useState("customer");
   const [customerAuthMode, setCustomerAuthMode] = useState("login");
   const [currentCustomer, setCurrentCustomer] = useState(null);
@@ -153,7 +140,55 @@ export default function MabelHairArt() {
   const [newLeave, setNewLeave] = useState({ staffId: data.staff[0]?.id || "mabel", startDate: todayISO(0), endDate: todayISO(0), reason: "İzin" });
   const [newBlock, setNewBlock] = useState({ staffId: "all", date: todayISO(0), startTime: "12:00", endTime: "13:00", reason: "Kapalı" });
 
-  useEffect(() => localStorage.setItem(LS_KEY, JSON.stringify(data)), [data]);
+  useEffect(() => {
+    async function loadAppState() {
+      const { data: row, error } = await supabase
+        .from("app_state")
+        .select("data")
+        .eq("id", 1)
+        .maybeSingle();
+
+      if (error) {
+        console.log("App state load error:", error);
+        setRemoteReady(true);
+        return;
+      }
+
+      if (row?.data) {
+        setData((old) => ({
+          ...old,
+          ...row.data,
+          settings: { ...defaultSettings, ...(row.data.settings || {}) },
+          services: row.data.services?.length ? row.data.services : defaultServices,
+          staff: row.data.staff?.length ? row.data.staff : defaultStaff,
+          appointments: row.data.appointments || [],
+          staffLeaves: row.data.staffLeaves || [],
+          blockedSlots: row.data.blockedSlots || [],
+          customerAccounts: row.data.customerAccounts || [],
+        }));
+      }
+
+      setRemoteReady(true);
+    }
+
+    loadAppState();
+  }, []);
+
+  useEffect(() => {
+    if (!remoteReady) return;
+
+    localStorage.setItem(LS_KEY, JSON.stringify(data));
+
+    const timer = setTimeout(async () => {
+      const { error } = await supabase
+        .from("app_state")
+        .upsert({ id: 1, data, updated_at: new Date().toISOString() });
+
+      if (error) console.log("App state save error:", error);
+    }, 500);
+
+    return () => clearTimeout(timer);
+  }, [data, remoteReady]);
 
   const serviceMap = useMemo(() => Object.fromEntries(data.services.map((s) => [s.id, s])), [data.services]);
   const staffMap = useMemo(() => Object.fromEntries(data.staff.map((s) => [s.id, s])), [data.staff]);
