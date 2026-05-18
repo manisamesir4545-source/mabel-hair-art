@@ -182,11 +182,28 @@ export default function MabelHairArt() {
     });
   }
 
-  const availableSlots = slots.filter((s) => !isClosed(date, s, staffId, serviceId));
-  useEffect(() => {
-    if (availableSlots.length && !availableSlots.includes(time)) setTime(availableSlots[0]);
-  }, [availableSlots.join("|"), time]);
+  const availableSlots = slots.filter((s) => {
+  if (isClosed(date, s, staffId, serviceId)) return false;
 
+  const slotDateTime = new Date(`${date}T${s}:00`);
+  const now = new Date();
+
+  if (slotDateTime <= now) return false;
+
+  return true;
+});
+  useEffect(() => {
+  const today = todayISO(0);
+
+  if (date < today) {
+    setDate(today);
+    return;
+  }
+
+  if (availableSlots.length && !availableSlots.includes(time)) {
+    setTime(availableSlots[0]);
+  }
+}, [date, availableSlots.join("|"), time]);
   const completed = data.appointments.filter((a) => a.status === "done");
   const todayRevenue = completed.filter((a) => a.date === todayISO(0)).reduce((s, a) => s + Number(a.paidAmount || 0), 0);
   const totalRevenue = completed.reduce((s, a) => s + Number(a.paidAmount || 0), 0);
