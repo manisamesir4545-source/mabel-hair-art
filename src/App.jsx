@@ -240,7 +240,7 @@ export default function MabelHairArt() {
   service: payload.serviceId,
   appointment_date: payload.date,
   appointment_time: payload.time,
-  staff_id: payload.staffId,
+  staff_id: null,
   note: payload.note || "",
   status: "active",
   paid_amount: 0,
