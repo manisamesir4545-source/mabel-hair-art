@@ -326,7 +326,7 @@ export default function MabelHairArt() {
                 Mabel Hair Art randevunuzu kolayca oluşturun.
               </h1>
               <p className="mt-5 max-w-2xl text-lg leading-8 text-zinc-300">
-                Hizmet seçin, uygun saati belirleyin. Yemek saati, personel izni, kapalı saatler ve dolu randevular otomatik kapanır.
+                Modern stil, profesyonel dokunuş.Randevunuzu şimdi oluşturun..
               </p>
               <div className="mt-8 flex flex-col gap-3 sm:flex-row">
                 <a href="#randevu" className="rounded-2xl bg-amber-300 px-6 py-4 text-center font-semibold text-black shadow-xl shadow-amber-500/20">
