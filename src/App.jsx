@@ -1,7 +1,7 @@
 // @ts-nocheck
 import React, { useEffect, useMemo, useState } from "react";
 import { Scissors, Search, Plus, Trash2, Check, X, MessageCircle, CreditCard, Users, Settings, CalendarDays, Clock, LogOut, Lock, UserPlus, UserRound } from "lucide-react";
-
+import { supabase } from "./supabase";
 const LS_KEY = "mabel_hair_art_clean_v1";
 const ADMIN_PIN = "Hardiler1";
 
@@ -205,18 +205,66 @@ export default function MabelHairArt() {
   const todayCount = data.appointments.filter((a) => a.date === todayISO(0) && a.status === "active").length;
   const density = todayCount <= 2 ? { text: "Bugün sakin", desc: "Rahat saatler mevcut", pct: 28 } : todayCount <= 5 ? { text: "Bugün orta yoğun", desc: "Uygun saatler azalıyor", pct: 58 } : { text: "Bugün yoğun", desc: "Erken randevu almanız önerilir", pct: 88 };
 
-  function addAppointment(payload) {
+  async function addAppointment(payload) {
     if (!payload.customerName || normPhone(payload.phone).length < 10) return alert("Ad ve telefon girin.");
     if (isClosed(payload.date, payload.time, payload.staffId, payload.serviceId)) return alert("Bu saat uygun değil.");
-    setData((d) => ({ ...d, appointments: [...d.appointments, { ...payload, id: id(), phone: normPhone(payload.phone), status: "active", paidAmount: 0, remainingDebt: 0 }] }));
+
+    const { data: insertedData, error } = await supabase
+      .from("appointments")
+      .insert([
+        {
+          customer_name: payload.customerName,
+          phone: normPhone(payload.phone),
+          service: payload.serviceId,
+          appointment_date: payload.date,
+          appointment_time: payload.time,
+        },
+      ])
+.select();
+
+    console.log("Supabase data:", insertedData);
+    console.log("Supabase error:", error);
+
+    if (error) {
+      alert("Veritabanına kayıt olmadı. Console hatasına bak.");
+      return false;
+    }
+
+    setData((d) => ({
+      ...d,
+      appointments: [
+        ...d.appointments,
+        {
+          ...payload,
+          id: id(),
+          phone: normPhone(payload.phone),
+          status: "active",
+          paidAmount: 0,
+          remainingDebt: 0,
+        },
+      ],
+    }));
+
     return true;
   }
 
-  function book() {
+  async function book() {
     if (!currentCustomer) return alert("Randevu almak için giriş yapın veya kayıt olun.");
-    const ok = addAppointment({ customerName: currentCustomer.name || customerName, phone: currentCustomer.phone || phone, serviceId, staffId, date, time, note });
+
+    const ok = await addAppointment({
+      customerName: currentCustomer.name || customerName,
+      phone: currentCustomer.phone || phone,
+      serviceId,
+      staffId,
+      date,
+      time,
+      note,
+    });
+
     if (ok) {
-      setCustomerName(""); setPhone(""); setNote("");
+      setCustomerName("");
+      setPhone("");
+      setNote("");
       alert("Randevu oluşturuldu.");
     }
   }
