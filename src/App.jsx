@@ -153,6 +153,47 @@ export default function MabelHairArt() {
   const [newLeave, setNewLeave] = useState({ staffId: data.staff[0]?.id || "mabel", startDate: todayISO(0), endDate: todayISO(0), reason: "İzin" });
   const [newBlock, setNewBlock] = useState({ staffId: "all", date: todayISO(0), startTime: "12:00", endTime: "13:00", reason: "Kapalı" });
 
+  const [appStateReady, setAppStateReady] = useState(false);
+
+  function adminStatePayload(source = data) {
+    return {
+      services: source.services || defaultServices,
+      staff: source.staff || defaultStaff,
+      settings: { ...defaultSettings, ...(source.settings || {}) },
+      staffLeaves: source.staffLeaves || [],
+      blockedSlots: source.blockedSlots || [],
+      customerAccounts: source.customerAccounts || [],
+    };
+  }
+
+  async function loadRemoteAppState() {
+    const { data: row, error } = await supabase
+      .from("app_state")
+      .select("data")
+      .eq("id", 1)
+      .maybeSingle();
+
+    if (error) {
+      console.log("App state load error:", error);
+      setAppStateReady(true);
+      return;
+    }
+
+    if (row?.data) {
+      setData((d) => ({
+        ...d,
+        services: row.data.services?.length ? row.data.services : d.services,
+        staff: row.data.staff?.length ? row.data.staff : d.staff,
+        settings: { ...defaultSettings, ...(row.data.settings || d.settings || {}) },
+        staffLeaves: row.data.staffLeaves || [],
+        blockedSlots: row.data.blockedSlots || [],
+        customerAccounts: row.data.customerAccounts || [],
+      }));
+    }
+
+    setAppStateReady(true);
+  }
+
   function normalizeAppointmentRow(a) {
     return {
       id: a.id,
@@ -209,6 +250,46 @@ export default function MabelHairArt() {
       supabase.removeChannel(channel);
     };
   }, []);
+
+  useEffect(() => {
+    loadRemoteAppState();
+
+    const timer = setInterval(loadRemoteAppState, 5000);
+
+    const channel = supabase
+      .channel("app-state-live")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "app_state" },
+        () => loadRemoteAppState()
+      )
+      .subscribe();
+
+    return () => {
+      clearInterval(timer);
+      supabase.removeChannel(channel);
+    };
+  }, []);
+
+  const adminStateJson = JSON.stringify(adminStatePayload());
+
+  useEffect(() => {
+    if (!appStateReady) return;
+
+    const timer = setTimeout(async () => {
+      const { error } = await supabase
+        .from("app_state")
+        .upsert({
+          id: 1,
+          data: adminStatePayload(),
+          updated_at: new Date().toISOString(),
+        });
+
+      if (error) console.log("App state save error:", error);
+    }, 500);
+
+    return () => clearTimeout(timer);
+  }, [appStateReady, adminStateJson]);
 
   useEffect(() => localStorage.setItem(LS_KEY, JSON.stringify(data)), [data]);
 
@@ -380,25 +461,99 @@ export default function MabelHairArt() {
     setComplete({ id: a.id, amount: price, paymentStatus: "paid", remainingDebt: 0, tariff: price });
   }
 
-  function saveComplete() {
+  async function saveComplete() {
     let paid = Number(complete.amount || 0);
     let debt = Number(complete.remainingDebt || 0);
     if (complete.paymentStatus === "debt") { paid = 0; debt = Number(complete.tariff); }
     if (complete.paymentStatus === "partial") debt = Math.max(Number(complete.tariff) - paid, 0);
     if (complete.paymentStatus === "paid") debt = 0;
+
+    const { error } = await supabase
+      .from("appointments")
+      .update({
+        status: "done",
+        paid_amount: paid,
+        remaining_debt: debt,
+        payment_status: complete.paymentStatus,
+      })
+      .eq("id", complete.id);
+
+    if (error) {
+      console.log("Complete appointment error:", error);
+      alert("Randevu tamamlanamadı. Console hatasına bak.");
+      return;
+    }
+
     setData((d) => ({ ...d, appointments: d.appointments.map((a) => a.id === complete.id ? { ...a, status: "done", paidAmount: paid, remainingDebt: debt, paymentStatus: complete.paymentStatus } : a) }));
     setComplete(null);
+    loadRemoteAppointments();
   }
 
-  function payDebt() {
+  async function payDebt() {
     const amount = Number(debtPay.amount || 0);
+    const target = data.appointments.find((a) => a.id === debtPay.id);
+    if (!target) return;
+
+    const oldDebt = Number(target.remainingDebt || 0);
+    const paid = Math.min(amount, oldDebt);
+    const nextPaidAmount = Number(target.paidAmount || 0) + paid;
+    const nextDebt = Math.max(oldDebt - paid, 0);
+
+    const { error } = await supabase
+      .from("appointments")
+      .update({
+        paid_amount: nextPaidAmount,
+        remaining_debt: nextDebt,
+      })
+      .eq("id", debtPay.id);
+
+    if (error) {
+      console.log("Debt payment error:", error);
+      alert("Borç ödemesi kaydedilemedi. Console hatasına bak.");
+      return;
+    }
+
     setData((d) => ({ ...d, appointments: d.appointments.map((a) => {
       if (a.id !== debtPay.id) return a;
-      const oldDebt = Number(a.remainingDebt || 0);
-      const paid = Math.min(amount, oldDebt);
-      return { ...a, paidAmount: Number(a.paidAmount || 0) + paid, remainingDebt: Math.max(oldDebt - paid, 0) };
+      return { ...a, paidAmount: nextPaidAmount, remainingDebt: nextDebt };
     }) }));
     setDebtPay(null);
+    loadRemoteAppointments();
+  }
+
+  async function cancelAppointment(apptId) {
+    const { error } = await supabase
+      .from("appointments")
+      .update({ status: "cancelled" })
+      .eq("id", apptId);
+
+    if (error) {
+      console.log("Cancel appointment error:", error);
+      alert("Randevu iptal edilemedi. Console hatasına bak.");
+      return;
+    }
+
+    setData((d) => ({ ...d, appointments: d.appointments.map((x) => x.id === apptId ? { ...x, status: "cancelled" } : x) }));
+    loadRemoteAppointments();
+  }
+
+  async function deleteAppointment(apptId) {
+    const ok = confirm("Bu randevu tamamen silinsin mi?");
+    if (!ok) return;
+
+    const { error } = await supabase
+      .from("appointments")
+      .delete()
+      .eq("id", apptId);
+
+    if (error) {
+      console.log("Delete appointment error:", error);
+      alert("Randevu silinemedi. Console hatasına bak.");
+      return;
+    }
+
+    setData((d) => ({ ...d, appointments: d.appointments.filter((x) => x.id !== apptId) }));
+    loadRemoteAppointments();
   }
 
   function startEditService(service) {
@@ -620,7 +775,7 @@ export default function MabelHairArt() {
               <div className="mb-6 grid gap-3 md:grid-cols-5"><Card><b>{data.appointments.filter((a) => a.date === todayISO(0)).length}</b><div className="text-sm text-zinc-400">Bugün</div></Card><Card><b>{data.appointments.filter((a) => a.status === "active").length}</b><div className="text-sm text-zinc-400">Aktif</div></Card><Card><b>{todayRevenue} TL</b><div className="text-sm text-zinc-400">Bugünkü Ciro</div></Card><Card><b>{totalRevenue} TL</b><div className="text-sm text-zinc-400">Toplam Ciro</div></Card><Card><b className="text-red-300">{totalDebt} TL</b><div className="text-sm text-zinc-400">Toplam Borç</div></Card></div>
               <div className="mb-6 flex flex-wrap gap-2">{[["appointments","Randevular"],["customers","Müşteriler"],["debts","Borçlar"],["revenue","Ciro"],["staff","Personel"],["availability","İzin/Kapalı"],["services","Hizmetler"],["settings","Ayarlar"]].map(([k,v]) => <button key={k} onClick={() => { setTab(k); setSelectedCustomerPhone(null); }} className={`rounded-full px-4 py-2 ${tab === k ? "bg-amber-300 text-black" : "bg-white/10"}`}>{v}</button>)}</div>
 
-              {tab === "appointments" && <Card><div className="mb-4 flex gap-3"><Search /><Input placeholder="Ara" value={search} onChange={(e) => setSearch(e.target.value)} /></div><div className="overflow-x-auto"><table className="w-full min-w-[850px] text-left text-sm"><thead className="text-zinc-400"><tr><th>Tarih</th><th>Müşteri</th><th>Hizmet</th><th>Personel</th><th>Durum</th><th>İşlem</th></tr></thead><tbody>{data.appointments.filter((a) => !search || (a.customerName + a.phone).toLowerCase().includes(search.toLowerCase())).map((a) => <tr key={a.id} className="border-t border-white/10"><td className="py-3">{prettyDate(a.date)} {a.time}</td><td><button onClick={() => { setTab("customers"); setSelectedCustomerPhone(a.phone); }} className="text-amber-300">{a.customerName}</button><div className="text-xs text-zinc-500">{a.phone}</div></td><td>{serviceMap[a.serviceId]?.name}<div className="text-xs text-zinc-500">Tarife {serviceMap[a.serviceId]?.price} TL</div>{Number(a.remainingDebt || 0) > 0 && <div className="text-xs text-red-300">Borç {a.remainingDebt} TL</div>}</td><td>{staffMap[a.staffId]?.name}</td><td><Status value={a.status} /></td><td className="flex flex-wrap gap-2 py-3"><a target="_blank" rel="noreferrer" href={wa(a.phone, msg(a))} className="rounded-xl bg-emerald-400/10 px-3 py-2 text-xs text-emerald-300"><MessageCircle className="mr-1 inline h-3 w-3" />WhatsApp</a><button onClick={() => openComplete(a)} className="rounded-xl bg-blue-400/10 px-3 py-2 text-xs text-blue-300"><Check className="mr-1 inline h-3 w-3" />Tamamla</button><button onClick={() => setData((d) => ({...d, appointments: d.appointments.map((x) => x.id === a.id ? {...x, status:"cancelled"} : x)}))} className="rounded-xl bg-red-400/10 px-3 py-2 text-xs text-red-300"><X className="mr-1 inline h-3 w-3" />İptal</button><button onClick={() => setData((d) => ({...d, appointments: d.appointments.filter((x) => x.id !== a.id)}))} className="rounded-xl bg-white/10 px-3 py-2 text-xs"><Trash2 className="h-3 w-3" /></button></td></tr>)}</tbody></table></div></Card>}
+              {tab === "appointments" && <Card><div className="mb-4 flex gap-3"><Search /><Input placeholder="Ara" value={search} onChange={(e) => setSearch(e.target.value)} /></div><div className="overflow-x-auto"><table className="w-full min-w-[850px] text-left text-sm"><thead className="text-zinc-400"><tr><th>Tarih</th><th>Müşteri</th><th>Hizmet</th><th>Personel</th><th>Durum</th><th>İşlem</th></tr></thead><tbody>{data.appointments.filter((a) => !search || (a.customerName + a.phone).toLowerCase().includes(search.toLowerCase())).map((a) => <tr key={a.id} className="border-t border-white/10"><td className="py-3">{prettyDate(a.date)} {a.time}</td><td><button onClick={() => { setTab("customers"); setSelectedCustomerPhone(a.phone); }} className="text-amber-300">{a.customerName}</button><div className="text-xs text-zinc-500">{a.phone}</div></td><td>{serviceMap[a.serviceId]?.name}<div className="text-xs text-zinc-500">Tarife {serviceMap[a.serviceId]?.price} TL</div>{Number(a.remainingDebt || 0) > 0 && <div className="text-xs text-red-300">Borç {a.remainingDebt} TL</div>}</td><td>{staffMap[a.staffId]?.name}</td><td><Status value={a.status} /></td><td className="flex flex-wrap gap-2 py-3"><a target="_blank" rel="noreferrer" href={wa(a.phone, msg(a))} className="rounded-xl bg-emerald-400/10 px-3 py-2 text-xs text-emerald-300"><MessageCircle className="mr-1 inline h-3 w-3" />WhatsApp</a><button onClick={() => openComplete(a)} className="rounded-xl bg-blue-400/10 px-3 py-2 text-xs text-blue-300"><Check className="mr-1 inline h-3 w-3" />Tamamla</button><button onClick={() => cancelAppointment(a.id)} className="rounded-xl bg-red-400/10 px-3 py-2 text-xs text-red-300"><X className="mr-1 inline h-3 w-3" />İptal</button><button onClick={() => deleteAppointment(a.id)} className="rounded-xl bg-white/10 px-3 py-2 text-xs"><Trash2 className="h-3 w-3" /></button></td></tr>)}</tbody></table></div></Card>}
 
               {tab === "customers" && <Card><div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between"><h2 className="text-2xl font-bold"><Users className="mr-2 inline text-amber-300" />Müşteriler</h2><div className="rounded-2xl border border-amber-300/20 bg-amber-300/10 px-4 py-3 text-sm"><span className="text-zinc-400">Toplam müşteri:</span> <b className="text-amber-200">{customers.length}</b></div></div>{!selectedCustomerPhone ? <div className="overflow-x-auto"><table className="w-full min-w-[650px] text-left text-sm"><thead className="text-zinc-400"><tr><th>Müşteri</th><th>Telefon</th><th>Randevu</th><th>Harcama</th><th>Borç</th><th></th></tr></thead><tbody>{customers.map((c) => <tr key={c.phone} className="border-t border-white/10"><td className="py-3">{c.name}</td><td>{c.phone}</td><td>{c.count}</td><td>{c.spent} TL</td><td className="text-red-300">{c.debt} TL</td><td><button onClick={() => setSelectedCustomerPhone(c.phone)} className="rounded-xl bg-amber-300/10 px-3 py-2 text-xs text-amber-300">Detay</button></td></tr>)}</tbody></table></div> : <div><button onClick={() => setSelectedCustomerPhone(null)} className="mb-4 rounded-xl bg-white/10 px-3 py-2">Geri</button><div className="space-y-3">{customerAppointments.map((a) => <div key={a.id} className="rounded-2xl bg-black/30 p-4"><b>{prettyDate(a.date)} {a.time}</b><div className="text-sm text-zinc-400">{serviceMap[a.serviceId]?.name} · {staffMap[a.staffId]?.name}</div><div className="mt-1">Alınan: {a.paidAmount || 0} TL {Number(a.remainingDebt || 0) > 0 && <span className="ml-3 text-red-300">Borç: {a.remainingDebt} TL</span>}</div><Status value={a.status} /></div>)}</div></div>}</Card>}
 
