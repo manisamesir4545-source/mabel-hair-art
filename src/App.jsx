@@ -28,7 +28,12 @@ const defaultSettings = {
 function todayISO(offset = 0) {
   const d = new Date();
   d.setDate(d.getDate() + offset);
-  return d.toISOString().slice(0, 10);
+
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+
+  return `${year}-${month}-${day}`;
 }
 function prettyDate(iso) {
   return new Date(iso + "T12:00:00").toLocaleDateString("tr-TR", {
