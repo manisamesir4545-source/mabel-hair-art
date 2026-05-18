@@ -177,7 +177,18 @@ export default function MabelHairArt() {
     });
   }
 
-  const availableSlots = slots.filter((s) => !isClosed(date, s, staffId, serviceId));
+  const availableSlots = slots.filter((s) => {
+  if (isClosed(date, s, staffId, serviceId)) return false;
+
+  const today = todayISO(0);
+  if (date === today) {
+    const now = new Date();
+    const currentMinutes = now.getHours() * 60 + now.getMinutes();
+    if (toMin(s) <= currentMinutes) return false;
+  }
+
+  return true;
+});
   useEffect(() => {
     if (availableSlots.length && !availableSlots.includes(time)) setTime(availableSlots[0]);
   }, [availableSlots.join("|"), time]);
@@ -453,7 +464,15 @@ export default function MabelHairArt() {
 
                 <div>
                   <h3 className="mb-3 flex items-center gap-2 font-semibold"><CalendarDays className="h-5 w-5 text-amber-300" /> Tarih Seç</h3>
-                  <Input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="w-full md:w-72" />
+                  
+              <Input 
+                type="date"
+                min={todayISO(0)}
+                value={date}
+                onChange={(e) => setDate(e.target.value)}
+                className="w-full md:w-72"
+              />
+  
                 </div>
 
                 <div>
