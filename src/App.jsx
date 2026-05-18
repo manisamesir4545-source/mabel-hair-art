@@ -235,12 +235,18 @@ export default function MabelHairArt() {
       .from("appointments")
       .insert([
         {
-          customer_name: payload.customerName,
-          phone: normPhone(payload.phone),
-          service: payload.serviceId,
-          appointment_date: payload.date,
-          appointment_time: payload.time,
-        },
+  customer_name: payload.customerName,
+  phone: normPhone(payload.phone),
+  service: payload.serviceId,
+  appointment_date: payload.date,
+  appointment_time: payload.time,
+  staff_id: payload.staffId,
+  note: payload.note || "",
+  status: "active",
+  paid_amount: 0,
+  remaining_debt: 0,
+  payment_status: "pending",
+},
       ]);
 
     console.log("Supabase data:", insertedData);
