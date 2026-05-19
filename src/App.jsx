@@ -412,6 +412,38 @@ export default function MabelHairArt() {
     if (!payload.customerName || normPhone(payload.phone).length < 10) return alert("Ad ve telefon girin.");
     if (isClosed(payload.date, payload.time, payload.staffId, payload.serviceId)) return alert("Bu saat uygun değil.");
 
+    const selectedStaffKey = payload.staffId || "mabel";
+    const requestedService = serviceMap[payload.serviceId] || { time: 30 };
+    const requestedStart = toMin(payload.time);
+    const requestedEnd = requestedStart + Number(requestedService.time || 30);
+
+    const { data: latestRows, error: latestError } = await supabase
+      .from("appointments")
+      .select("*")
+      .eq("appointment_date", payload.date)
+      .eq("staff_key", selectedStaffKey)
+      .eq("status", "active");
+
+    if (latestError) {
+      console.log("Latest appointments check error:", latestError);
+      alert("Randevu kontrolü yapılamadı. Lütfen tekrar deneyin.");
+      return false;
+    }
+
+    const latestAppointments = (latestRows || []).map(normalizeAppointmentRow);
+    const hasLiveConflict = latestAppointments.some((a) => {
+      const otherService = serviceMap[a.serviceId] || { time: 30 };
+      const otherStart = toMin(a.time);
+      const otherEnd = otherStart + Number(otherService.time || 30);
+      return overlap(requestedStart, requestedEnd, otherStart, otherEnd);
+    });
+
+    if (hasLiveConflict) {
+      await loadRemoteAppointments();
+      alert("Bu saat az önce doldu. Lütfen başka bir saat seçin.");
+      return false;
+    }
+
     const { data: insertedData, error } = await supabase
       .from("appointments")
       .insert([
@@ -421,7 +453,7 @@ export default function MabelHairArt() {
           service: payload.serviceId,
           appointment_date: payload.date,
           appointment_time: payload.time,
-          staff_key: payload.staffId || "mabel",
+          staff_key: selectedStaffKey,
           staff_id: null,
           note: payload.note || "",
           status: "active",
@@ -436,7 +468,12 @@ export default function MabelHairArt() {
     console.log("Supabase error:", error);
 
     if (error) {
-      alert("Veritabanına kayıt olmadı. Console hatasına bak.");
+      await loadRemoteAppointments();
+      if (error.code === "23505") {
+        alert("Bu saat az önce doldu. Lütfen başka bir saat seçin.");
+      } else {
+        alert("Veritabanına kayıt olmadı. Console hatasına bak.");
+      }
       return false;
     }
 
