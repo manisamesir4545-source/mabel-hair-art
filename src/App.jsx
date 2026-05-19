@@ -131,6 +131,7 @@ export default function MabelHairArt() {
   const [customerAuthMode, setCustomerAuthMode] = useState("login");
   const [currentCustomer, setCurrentCustomer] = useState(null);
   const [customerPanel, setCustomerPanel] = useState("booking");
+  const [customerBookingStep, setCustomerBookingStep] = useState("service");
   const [profileForm, setProfileForm] = useState({ name: "", phone: "", username: "", password: "" });
   const [customerLogin, setCustomerLogin] = useState({ username: "", password: "" });
   const [customerRegister, setCustomerRegister] = useState({ username: "", password: "", phone: "", name: "" });
@@ -138,6 +139,7 @@ export default function MabelHairArt() {
   const [pin, setPin] = useState("");
   const [tab, setTab] = useState("appointments");
   const [search, setSearch] = useState("");
+  const [adminDate, setAdminDate] = useState(todayISO(0));
   const [customerSearch, setCustomerSearch] = useState("");
   const [selectedCustomerPhone, setSelectedCustomerPhone] = useState(null);
 
@@ -403,9 +405,46 @@ export default function MabelHairArt() {
   });
 
   const customerAppointments = selectedCustomerPhone ? data.appointments.filter((a) => a.phone === selectedCustomerPhone) : [];
+  const selectedCustomer = selectedCustomerPhone ? customers.find((c) => c.phone === selectedCustomerPhone) : null;
+  const selectedCustomerAppointments = customerAppointments
+    .slice()
+    .sort((a, b) => `${b.date} ${b.time}`.localeCompare(`${a.date} ${a.time}`));
+  const selectedCustomerActiveAppointments = selectedCustomerAppointments.filter((a) => a.status === "active");
+  const selectedCustomerPastAppointments = selectedCustomerAppointments.filter((a) => a.status !== "active");
   const debtAppointments = data.appointments.filter((a) => Number(a.remainingDebt || 0) > 0);
+  const debtGroups = useMemo(() => {
+    const map = {};
+    debtAppointments.forEach((a) => {
+      const key = a.phone || a.customerName || a.id;
+      if (!map[key]) {
+        map[key] = {
+          phone: a.phone,
+          name: a.customerName,
+          totalDebt: 0,
+          paidAmount: 0,
+          count: 0,
+          appointments: [],
+          last: `${a.date} ${a.time}`,
+        };
+      }
+      map[key].totalDebt += Number(a.remainingDebt || 0);
+      map[key].paidAmount += Number(a.paidAmount || 0);
+      map[key].count += 1;
+      map[key].appointments.push(a);
+      if (`${a.date} ${a.time}` > map[key].last) map[key].last = `${a.date} ${a.time}`;
+    });
+
+    return Object.values(map).sort((a, b) => b.last.localeCompare(a.last));
+  }, [debtAppointments]);
   const todayCount = data.appointments.filter((a) => a.date === todayISO(0) && a.status === "active").length;
-  const density = todayCount <= 2 ? { text: "Bugün sakin", desc: "Rahat saatler mevcut", pct: 28 } : todayCount <= 5 ? { text: "Bugün orta yoğun", desc: "Uygun saatler azalıyor", pct: 58 } : { text: "Bugün yoğun", desc: "Erken randevu almanız önerilir", pct: 88 };
+  const densityPct = Math.min(100, Math.round((todayCount / Math.max(slots.length, 1)) * 100));
+  const density = todayCount === 0
+    ? { text: "Bugün boş", desc: "Tüm saatler rahat görünüyor", pct: 0 }
+    : densityPct <= 30
+      ? { text: "Bugün sakin", desc: "Rahat saatler mevcut", pct: densityPct }
+      : densityPct <= 65
+        ? { text: "Bugün orta yoğun", desc: "Uygun saatler azalıyor", pct: densityPct }
+        : { text: "Bugün yoğun", desc: "Erken randevu almanız önerilir", pct: densityPct };
   const myAppointments = currentCustomer
     ? data.appointments
         .filter((a) => a.phone === currentCustomer.phone)
@@ -433,11 +472,9 @@ export default function MabelHairArt() {
 
     if (latestError) {
       console.log("Latest appointments check error:", latestError);
-      alert("Randevu kontrolü yapılamadı. Lütfen tekrar deneyin.");
-      return false;
     }
 
-    const latestAppointments = (latestRows || []).map(normalizeAppointmentRow);
+    const latestAppointments = latestError ? [] : (latestRows || []).map(normalizeAppointmentRow);
     const hasLiveConflict = latestAppointments.some((a) => {
       const otherService = serviceMap[a.serviceId] || { time: 30 };
       const otherStart = toMin(a.time);
@@ -451,7 +488,7 @@ export default function MabelHairArt() {
       return false;
     }
 
-    const { data: insertedData, error } = await supabase
+    const { error } = await supabase
       .from("appointments")
       .insert([
         {
@@ -468,10 +505,8 @@ export default function MabelHairArt() {
           remaining_debt: 0,
           payment_status: "pending",
         },
-      ])
-      .select();
+      ]);
 
-    console.log("Supabase data:", insertedData);
     console.log("Supabase error:", error);
 
     if (error) {
@@ -479,7 +514,7 @@ export default function MabelHairArt() {
       if (error.code === "23505") {
         alert("Bu saat az önce doldu. Lütfen başka bir saat seçin.");
       } else {
-        alert("Veritabanına kayıt olmadı. Console hatasına bak.");
+        alert(`Veritabanına kayıt olmadı: ${error.message || error.code || "Bilinmeyen hata"}`);
       }
       return false;
     }
@@ -490,7 +525,7 @@ export default function MabelHairArt() {
         ...d.appointments,
         {
           ...payload,
-          id: insertedData?.[0]?.id || id(),
+          id: id(),
           phone: normPhone(payload.phone),
           status: "active",
           paidAmount: 0,
@@ -521,6 +556,8 @@ export default function MabelHairArt() {
       setCustomerName("");
       setPhone("");
       setNote("");
+      setCustomerPanel("appointments");
+      setCustomerBookingStep("service");
       alert("Randevu oluşturuldu.");
     }
   }
@@ -534,6 +571,7 @@ export default function MabelHairArt() {
     localStorage.removeItem(CUSTOMER_SESSION_KEY);
     setCurrentCustomer(null);
     setCustomerPanel("booking");
+    setCustomerBookingStep("service");
   }
 
   async function updateCustomerProfile() {
@@ -591,6 +629,8 @@ export default function MabelHairArt() {
     const acc = { ...customerRegister, phone: normPhone(customerRegister.phone), name: customerRegister.name || customerRegister.username, id: id() };
     setData((d) => ({ ...d, customerAccounts: [...(d.customerAccounts || []), acc] }));
     setCurrentCustomer(acc);
+    setCustomerPanel("booking");
+    setCustomerBookingStep("service");
     setCustomerName(acc.name);
     setPhone(acc.phone);
     setProfileForm({ name: acc.name, phone: acc.phone, username: acc.username, password: acc.password });
@@ -601,6 +641,8 @@ export default function MabelHairArt() {
     const acc = (data.customerAccounts || []).find((u) => u.username === customerLogin.username && u.password === customerLogin.password);
     if (!acc) return alert("Kullanıcı adı veya şifre hatalı.");
     setCurrentCustomer(acc);
+    setCustomerPanel("booking");
+    setCustomerBookingStep("service");
     setCustomerName(acc.name);
     setPhone(acc.phone);
     setProfileForm({ name: acc.name || "", phone: acc.phone || "", username: acc.username || "", password: acc.password || "" });
@@ -642,22 +684,38 @@ export default function MabelHairArt() {
 
   async function payDebt() {
     const amount = Number(debtPay.amount || 0);
-    const target = data.appointments.find((a) => a.id === debtPay.id);
-    if (!target) return;
+    const targets = debtPay.appointments?.length
+      ? debtPay.appointments
+      : data.appointments.filter((a) => a.id === debtPay.id);
+    if (!targets.length || amount <= 0) return;
 
-    const oldDebt = Number(target.remainingDebt || 0);
-    const paid = Math.min(amount, oldDebt);
-    const nextPaidAmount = Number(target.paidAmount || 0) + paid;
-    const nextDebt = Math.max(oldDebt - paid, 0);
-
-    const { error } = await supabase
-      .from("appointments")
-      .update({
-        paid_amount: nextPaidAmount,
-        remaining_debt: nextDebt,
+    let remainingPayment = amount;
+    const updates = targets
+      .slice()
+      .sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`))
+      .map((target) => {
+        const oldDebt = Number(target.remainingDebt || 0);
+        const paid = Math.min(remainingPayment, oldDebt);
+        remainingPayment -= paid;
+        return {
+          id: target.id,
+          paidAmount: Number(target.paidAmount || 0) + paid,
+          remainingDebt: Math.max(oldDebt - paid, 0),
+        };
       })
-      .eq("id", debtPay.id);
+      .filter((u) => targets.some((a) => a.id === u.id && Number(a.remainingDebt || 0) !== u.remainingDebt));
 
+    const results = await Promise.all(updates.map((u) =>
+      supabase
+        .from("appointments")
+        .update({
+          paid_amount: u.paidAmount,
+          remaining_debt: u.remainingDebt,
+        })
+        .eq("id", u.id)
+    ));
+
+    const error = results.find((r) => r.error)?.error;
     if (error) {
       console.log("Debt payment error:", error);
       alert("Borç ödemesi kaydedilemedi. Console hatasına bak.");
@@ -665,8 +723,9 @@ export default function MabelHairArt() {
     }
 
     setData((d) => ({ ...d, appointments: d.appointments.map((a) => {
-      if (a.id !== debtPay.id) return a;
-      return { ...a, paidAmount: nextPaidAmount, remainingDebt: nextDebt };
+      const update = updates.find((u) => u.id === a.id);
+      if (!update) return a;
+      return { ...a, paidAmount: update.paidAmount, remainingDebt: update.remainingDebt };
     }) }));
     setDebtPay(null);
     loadRemoteAppointments();
@@ -734,6 +793,40 @@ export default function MabelHairArt() {
     return `Sayın ${a.customerName}, Mabel Hair Art randevunuz ${prettyDate(a.date)} saat ${a.time}. Gelemeyecekseniz lütfen iptal etmeyi unutmayınız.`;
   }
 
+  const adminDays = useMemo(() => {
+    const weekday = ["Pazar", "Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi"];
+    return Array.from({ length: 14 }, (_, i) => {
+      const iso = todayISO(i);
+      const d = new Date(`${iso}T12:00:00`);
+      return {
+        iso,
+        day: d.getDate(),
+        label: i === 0 ? "Bugün" : i === 1 ? "Yarın" : weekday[d.getDay()],
+        month: d.toLocaleDateString("tr-TR", { month: "long" }),
+        count: data.appointments.filter((a) => a.date === iso && a.status === "active").length,
+      };
+    });
+  }, [data.appointments]);
+
+  const adminSchedule = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return slots
+      .map((slot) => {
+        const appointment = data.appointments.find((a) => a.date === adminDate && a.time === slot);
+        const duration = Number(serviceMap[appointment?.serviceId]?.time || data.settings.slotStep || 30);
+        return {
+          slot,
+          end: toTime(toMin(slot) + duration),
+          appointment,
+        };
+      })
+      .filter(({ appointment }) => {
+        if (!q) return true;
+        if (!appointment) return false;
+        return `${appointment.customerName} ${appointment.phone} ${serviceMap[appointment.serviceId]?.name || ""} ${staffMap[appointment.staffId]?.name || ""}`.toLowerCase().includes(q);
+      });
+  }, [adminDate, data.appointments, data.settings.slotStep, search, serviceMap, slots, staffMap]);
+
   return (
     <div className="relative min-h-screen overflow-hidden bg-[#080808] text-white">
       <div className="pointer-events-none fixed inset-0">
@@ -770,14 +863,6 @@ export default function MabelHairArt() {
               <p className="mt-5 max-w-2xl text-lg leading-8 text-zinc-300">
                 Modern stil, profesyonel dokunuş.Randevunuzu şimdi oluşturun..
               </p>
-              <div className="mt-8 flex flex-col gap-3 sm:flex-row">
-                <a href="#randevu" className="rounded-2xl bg-amber-300 px-6 py-4 text-center font-semibold text-black shadow-xl shadow-amber-500/20">
-                  Randevu Al
-                </a>
-                <button onClick={() => setView("admin")} className="rounded-2xl border border-white/10 bg-white/5 px-6 py-4 font-semibold text-white">
-                  Admin Paneli Gör
-                </button>
-              </div>
             </div>
 
             <Card className="relative overflow-hidden">
@@ -804,88 +889,43 @@ export default function MabelHairArt() {
             </Card>
           </section>
 
-          <section id="randevu" className="grid gap-6 lg:grid-cols-[1fr_380px]">
+          <section id="randevu" className={`grid gap-6 ${currentCustomer ? "lg:grid-cols-[1fr_380px]" : "lg:grid-cols-[1fr_0.85fr]"}`}>
             <Card>
-              <div className="mb-6 flex items-center justify-between">
+              <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
                 <div>
-                  <h2 className="text-3xl font-semibold">Randevu Oluştur</h2>
-                  <p className="mt-1 text-zinc-400">Sadece seçilen hizmetin sığacağı boş saatler gösterilir.</p>
+                  <h2 className="text-3xl font-semibold">{currentCustomer ? "Müşteri Paneli" : "Randevu için giriş yapın"}</h2>
+                  <p className="mt-1 text-zinc-400">{currentCustomer ? "Randevunuzu adım adım oluşturun, bilgilerinizi ve randevularınızı yönetin." : "Giriş yaptıktan sonra hizmet, personel, tarih ve saat seçimi açılır."}</p>
                 </div>
                 <div className="rounded-2xl border border-amber-300/30 bg-amber-300/10 p-3 text-amber-200">
-                  <Scissors className="h-6 w-6" />
+                  {currentCustomer ? <UserRound className="h-6 w-6" /> : <Lock className="h-6 w-6" />}
                 </div>
               </div>
 
-              <div className="space-y-8">
-                <div>
-                  <h3 className="mb-3 flex items-center gap-2 font-semibold"><Scissors className="h-5 w-5 text-amber-300" /> Hizmet Seç</h3>
-                  <div className="grid gap-3 md:grid-cols-2">
-                    {data.services.map((s) => (
-                      <button key={s.id} onClick={() => setServiceId(s.id)} className={`rounded-2xl border p-4 text-left transition ${serviceId === s.id ? "border-amber-300 bg-amber-300/10" : "border-white/10 bg-black/20 hover:border-white/25"}`}>
-                        <div className="flex items-center justify-between gap-3">
-                          <b>{s.name}</b>
-                          <span className="text-amber-200">{s.price} TL</span>
-                        </div>
-                        <p className="mt-2 text-sm text-zinc-400">{s.desc}</p>
-                        <div className="mt-3 text-xs text-zinc-500">Süre: {s.time} dk</div>
-                      </button>
-                    ))}
+              {!currentCustomer ? (
+                <div className="rounded-3xl border border-amber-300/20 bg-amber-300/10 p-5">
+                  <div className="mb-4 flex gap-2">
+                    <button onClick={() => setCustomerAuthMode("login")} className={`rounded-full px-4 py-2 text-sm ${customerAuthMode === "login" ? "bg-amber-300 text-black" : "bg-black/30 text-zinc-200"}`}>Giriş Yap</button>
+                    <button onClick={() => setCustomerAuthMode("register")} className={`rounded-full px-4 py-2 text-sm ${customerAuthMode === "register" ? "bg-amber-300 text-black" : "bg-black/30 text-zinc-200"}`}>Kayıt Ol</button>
                   </div>
-                </div>
-
-                <div>
-                  <h3 className="mb-3 flex items-center gap-2 font-semibold"><Users className="h-5 w-5 text-amber-300" /> Personel Seç</h3>
-                  <div className="grid gap-3 md:grid-cols-2">
-                    {data.staff.filter((s) => s.active).map((s) => (
-                      <button key={s.id} onClick={() => setStaffId(s.id)} className={`rounded-2xl border p-4 text-left transition ${staffId === s.id ? "border-amber-300 bg-amber-300/10" : "border-white/10 bg-black/20 hover:border-white/25"}`}>
-                        <b>{s.name}</b>
-                        <div className="mt-1 text-sm text-zinc-400">{s.role}</div>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div>
-                  <h3 className="mb-3 flex items-center gap-2 font-semibold"><CalendarDays className="h-5 w-5 text-amber-300" /> Tarih Seç</h3>
-                  <Input type="date" min={todayISO(0)} value={date} onChange={(e) => setDate(e.target.value)} className="w-full md:w-72" />
-                </div>
-
-                <div>
-                  <h3 className="mb-3 flex items-center gap-2 font-semibold"><Clock className="h-5 w-5 text-amber-300" /> Uygun Saatler</h3>
-                  <div className="grid grid-cols-3 gap-3 md:grid-cols-6">
-                    {availableSlots.map((s) => (
-                      <button key={s} onClick={() => setTime(s)} className={`rounded-2xl border px-3 py-3 text-sm transition ${time === s ? "border-amber-300 bg-amber-300 text-black" : "border-white/10 bg-black/20 hover:border-white/25"}`}>
-                        {s}
-                      </button>
-                    ))}
-                    {availableSlots.length === 0 && <div className="col-span-full rounded-2xl border border-red-400/20 bg-red-400/10 p-4 text-sm text-red-200">Uygun saat yok.</div>}
-                  </div>
-                </div>
-
-                {!currentCustomer ? (
-                  <div className="rounded-3xl border border-amber-300/20 bg-amber-300/10 p-5">
-                    <div className="mb-4 flex gap-2">
-                      <button onClick={() => setCustomerAuthMode("login")} className={`rounded-full px-4 py-2 text-sm ${customerAuthMode === "login" ? "bg-amber-300 text-black" : "bg-black/30 text-zinc-200"}`}>Giriş Yap</button>
-                      <button onClick={() => setCustomerAuthMode("register")} className={`rounded-full px-4 py-2 text-sm ${customerAuthMode === "register" ? "bg-amber-300 text-black" : "bg-black/30 text-zinc-200"}`}>Kayıt Ol</button>
+                  {customerAuthMode === "login" ? (
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <Input placeholder="Kullanıcı adı" value={customerLogin.username} onChange={(e) => setCustomerLogin({ ...customerLogin, username: e.target.value })} />
+                      <Input type="password" placeholder="Şifre" value={customerLogin.password} onChange={(e) => setCustomerLogin({ ...customerLogin, password: e.target.value })} />
+                      <button onClick={loginCustomer} className="rounded-2xl bg-amber-300 px-5 py-3 font-bold text-black md:col-span-2"><UserRound className="mr-2 inline h-4 w-4" /> Giriş Yap</button>
                     </div>
-                    {customerAuthMode === "login" ? (
-                      <div className="grid gap-3 md:grid-cols-2">
-                        <Input placeholder="Kullanıcı adı" value={customerLogin.username} onChange={(e) => setCustomerLogin({ ...customerLogin, username: e.target.value })} />
-                        <Input type="password" placeholder="Şifre" value={customerLogin.password} onChange={(e) => setCustomerLogin({ ...customerLogin, password: e.target.value })} />
-                        <button onClick={loginCustomer} className="rounded-2xl bg-amber-300 px-5 py-3 font-bold text-black md:col-span-2"><UserRound className="mr-2 inline h-4 w-4" /> Giriş Yap</button>
-                      </div>
-                    ) : (
-                      <div className="grid gap-3 md:grid-cols-2">
-                        <Input placeholder="Ad Soyad" value={customerRegister.name} onChange={(e) => setCustomerRegister({ ...customerRegister, name: e.target.value })} />
-                        <Input placeholder="Telefon" value={customerRegister.phone} onChange={(e) => setCustomerRegister({ ...customerRegister, phone: e.target.value })} />
-                        <Input placeholder="Kullanıcı adı" value={customerRegister.username} onChange={(e) => setCustomerRegister({ ...customerRegister, username: e.target.value })} />
-                        <Input type="password" placeholder="Şifre" value={customerRegister.password} onChange={(e) => setCustomerRegister({ ...customerRegister, password: e.target.value })} />
-                        <button onClick={registerCustomer} className="rounded-2xl bg-amber-300 px-5 py-3 font-bold text-black md:col-span-2"><UserPlus className="mr-2 inline h-4 w-4" /> Kayıt Ol</button>
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <div className="rounded-3xl border border-emerald-400/20 bg-emerald-400/10 p-5">
+                  ) : (
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <Input placeholder="Ad Soyad" value={customerRegister.name} onChange={(e) => setCustomerRegister({ ...customerRegister, name: e.target.value })} />
+                      <Input placeholder="Telefon" value={customerRegister.phone} onChange={(e) => setCustomerRegister({ ...customerRegister, phone: e.target.value })} />
+                      <Input placeholder="Kullanıcı adı" value={customerRegister.username} onChange={(e) => setCustomerRegister({ ...customerRegister, username: e.target.value })} />
+                      <Input type="password" placeholder="Şifre" value={customerRegister.password} onChange={(e) => setCustomerRegister({ ...customerRegister, password: e.target.value })} />
+                      <button onClick={registerCustomer} className="rounded-2xl bg-amber-300 px-5 py-3 font-bold text-black md:col-span-2"><UserPlus className="mr-2 inline h-4 w-4" /> Kayıt Ol</button>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div>
+                  <div className="mb-5 rounded-3xl border border-emerald-400/20 bg-emerald-400/10 p-5">
                     <div className="flex items-center justify-between gap-3">
                       <div>
                         <div className="font-semibold text-emerald-200">{currentCustomer.name}</div>
@@ -893,86 +933,150 @@ export default function MabelHairArt() {
                       </div>
                       <button onClick={logoutCustomer} className="rounded-xl bg-black/30 px-3 py-2 text-xs">Çıkış</button>
                     </div>
-
                     <div className="mt-4 flex flex-wrap gap-2">
-                      <button onClick={() => setCustomerPanel("booking")} className={`rounded-full px-4 py-2 text-sm ${customerPanel === "booking" ? "bg-amber-300 text-black" : "bg-black/30 text-zinc-200"}`}>Randevu Notu</button>
+                      <button onClick={() => setCustomerPanel("booking")} className={`rounded-full px-4 py-2 text-sm ${customerPanel === "booking" ? "bg-amber-300 text-black" : "bg-black/30 text-zinc-200"}`}>Randevu Al</button>
                       <button onClick={() => setCustomerPanel("appointments")} className={`rounded-full px-4 py-2 text-sm ${customerPanel === "appointments" ? "bg-amber-300 text-black" : "bg-black/30 text-zinc-200"}`}>Randevularım</button>
                       <button onClick={() => setCustomerPanel("profile")} className={`rounded-full px-4 py-2 text-sm ${customerPanel === "profile" ? "bg-amber-300 text-black" : "bg-black/30 text-zinc-200"}`}>Profilim</button>
                     </div>
-
-                    {customerPanel === "booking" && (
-                      <Textarea placeholder="Not / İstek" value={note} onChange={(e) => setNote(e.target.value)} className="mt-4 min-h-24 w-full py-4" />
-                    )}
-
-                    {customerPanel === "appointments" && (
-                      <div className="mt-4 space-y-4">
-                        <div>
-                          <h4 className="mb-2 font-semibold text-emerald-200">Aktif Randevularım</h4>
-                          <div className="space-y-2">
-                            {myActiveAppointments.length === 0 && <div className="rounded-2xl bg-black/30 p-3 text-sm text-zinc-300">Aktif randevunuz yok.</div>}
-                            {myActiveAppointments.map((a) => (
-                              <div key={a.id} className="rounded-2xl bg-black/30 p-4">
-                                <div className="flex items-start justify-between gap-3">
-                                  <div>
-                                    <b>{prettyDate(a.date)} · {a.time}</b>
-                                    <div className="text-sm text-zinc-400">{serviceMap[a.serviceId]?.name} · {staffMap[a.staffId]?.name}</div>
-                                    {a.note && <div className="mt-1 text-xs text-zinc-500">Not: {a.note}</div>}
-                                  </div>
-                                  <button onClick={() => cancelAppointment(a.id)} className="rounded-xl bg-red-400/10 px-3 py-2 text-xs text-red-300">İptal Et</button>
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-
-                        <div>
-                          <h4 className="mb-2 font-semibold text-zinc-200">Geçmiş / İptal Randevularım</h4>
-                          <div className="space-y-2">
-                            {myPastAppointments.length === 0 && <div className="rounded-2xl bg-black/30 p-3 text-sm text-zinc-300">Geçmiş randevunuz yok.</div>}
-                            {myPastAppointments.slice(0, 8).map((a) => (
-                              <div key={a.id} className="rounded-2xl bg-black/30 p-4">
-                                <div className="flex items-center justify-between gap-3">
-                                  <div>
-                                    <b>{prettyDate(a.date)} · {a.time}</b>
-                                    <div className="text-sm text-zinc-400">{serviceMap[a.serviceId]?.name} · {staffMap[a.staffId]?.name}</div>
-                                  </div>
-                                  <Status value={a.status} />
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      </div>
-                    )}
-
-                    {customerPanel === "profile" && (
-                      <div className="mt-4 grid gap-3 md:grid-cols-2">
-                        <Input placeholder="Ad Soyad" value={profileForm.name} onChange={(e) => setProfileForm({ ...profileForm, name: e.target.value })} />
-                        <Input placeholder="Telefon" value={profileForm.phone} onChange={(e) => setProfileForm({ ...profileForm, phone: e.target.value })} />
-                        <Input placeholder="Kullanıcı adı" value={profileForm.username} onChange={(e) => setProfileForm({ ...profileForm, username: e.target.value })} />
-                        <Input type="password" placeholder="Şifre" value={profileForm.password} onChange={(e) => setProfileForm({ ...profileForm, password: e.target.value })} />
-                        <button onClick={updateCustomerProfile} className="rounded-2xl bg-amber-300 px-5 py-3 font-bold text-black md:col-span-2">Profili Kaydet</button>
-                      </div>
-                    )}
                   </div>
-                )}
-              </div>
+
+                  {customerPanel === "booking" && (
+                    <div className="space-y-6">
+                      <div className="grid grid-cols-2 gap-3 text-sm">
+                        <button onClick={() => setCustomerBookingStep("service")} className={`rounded-2xl border px-4 py-3 text-left ${customerBookingStep === "service" ? "border-amber-300 bg-amber-300 text-black" : "border-white/10 bg-black/20 text-zinc-300"}`}><b>1</b> Hizmet & Personel</button>
+                        <button onClick={() => setCustomerBookingStep("datetime")} className={`rounded-2xl border px-4 py-3 text-left ${customerBookingStep === "datetime" ? "border-amber-300 bg-amber-300 text-black" : "border-white/10 bg-black/20 text-zinc-300"}`}><b>2</b> Tarih & Saat</button>
+                      </div>
+
+                      {customerBookingStep === "service" && (
+                        <div className="space-y-8">
+                          <div>
+                            <h3 className="mb-3 flex items-center gap-2 font-semibold"><Scissors className="h-5 w-5 text-amber-300" /> Hizmet Seç</h3>
+                            <div className="grid gap-3 md:grid-cols-2">
+                              {data.services.map((s) => (
+                                <button key={s.id} onClick={() => setServiceId(s.id)} className={`rounded-2xl border p-4 text-left transition ${serviceId === s.id ? "border-amber-300 bg-amber-300/10" : "border-white/10 bg-black/20 hover:border-white/25"}`}>
+                                  <div className="flex items-center justify-between gap-3">
+                                    <b>{s.name}</b>
+                                    <span className="text-amber-200">{s.price} TL</span>
+                                  </div>
+                                  <p className="mt-2 text-sm text-zinc-400">{s.desc}</p>
+                                  <div className="mt-3 text-xs text-zinc-500">Süre: {s.time} dk</div>
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+
+                          <div>
+                            <h3 className="mb-3 flex items-center gap-2 font-semibold"><Users className="h-5 w-5 text-amber-300" /> Personel Seç</h3>
+                            <div className="grid gap-3 md:grid-cols-2">
+                              {data.staff.filter((s) => s.active).map((s) => (
+                                <button key={s.id} onClick={() => setStaffId(s.id)} className={`rounded-2xl border p-4 text-left transition ${staffId === s.id ? "border-amber-300 bg-amber-300/10" : "border-white/10 bg-black/20 hover:border-white/25"}`}>
+                                  <b>{s.name}</b>
+                                  <div className="mt-1 text-sm text-zinc-400">{s.role}</div>
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+
+                          <div className="rounded-2xl border border-white/10 bg-black/20 p-4 text-sm text-zinc-300">
+                            Seçiminiz hazır. Üstteki <b className="text-amber-200">2 Tarih & Saat</b> adımına dokunup uygun saati seçin.
+                          </div>
+                        </div>
+                      )}
+
+                      {customerBookingStep === "datetime" && (
+                        <div className="space-y-6">
+                          <div>
+                            <h3 className="mb-3 flex items-center gap-2 font-semibold"><CalendarDays className="h-5 w-5 text-amber-300" /> Tarih Seç</h3>
+                            <Input type="date" min={todayISO(0)} value={date} onChange={(e) => setDate(e.target.value)} className="w-full md:w-72" />
+                          </div>
+                          <div>
+                            <h3 className="mb-3 flex items-center gap-2 font-semibold"><Clock className="h-5 w-5 text-amber-300" /> Uygun Saatler</h3>
+                            <div className="grid grid-cols-3 gap-3 md:grid-cols-6">
+                              {availableSlots.map((s) => (
+                                <button key={s} onClick={() => setTime(s)} className={`rounded-2xl border px-3 py-3 text-sm transition ${time === s ? "border-amber-300 bg-amber-300 text-black" : "border-white/10 bg-black/20 hover:border-white/25"}`}>{s}</button>
+                              ))}
+                              {availableSlots.length === 0 && <div className="col-span-full rounded-2xl border border-red-400/20 bg-red-400/10 p-4 text-sm text-red-200">Uygun saat yok.</div>}
+                            </div>
+                          </div>
+                          <Textarea placeholder="Not / İstek" value={note} onChange={(e) => setNote(e.target.value)} className="min-h-24 w-full py-4" />
+                          <div className="flex flex-col gap-2 sm:flex-row">
+                            <button onClick={() => setCustomerBookingStep("service")} className="rounded-2xl bg-white/10 px-5 py-4 font-semibold">Geri</button>
+                            <button onClick={book} disabled={!availableSlots.length} className="flex-1 rounded-2xl bg-amber-300 px-5 py-4 font-bold text-black shadow-xl shadow-amber-500/20 disabled:opacity-40">Randevuyu Oluştur</button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {customerPanel === "appointments" && (
+                    <div className="space-y-4">
+                      <div>
+                        <h4 className="mb-2 font-semibold text-emerald-200">Aktif Randevularım</h4>
+                        <div className="space-y-2">
+                          {myActiveAppointments.length === 0 && <div className="rounded-2xl bg-black/30 p-3 text-sm text-zinc-300">Aktif randevunuz yok.</div>}
+                          {myActiveAppointments.map((a) => (
+                            <div key={a.id} className="rounded-2xl bg-black/30 p-4">
+                              <div className="flex items-start justify-between gap-3">
+                                <div>
+                                  <b>{prettyDate(a.date)} · {a.time}</b>
+                                  <div className="text-sm text-zinc-400">{serviceMap[a.serviceId]?.name} · {staffMap[a.staffId]?.name}</div>
+                                  {a.note && <div className="mt-1 text-xs text-zinc-500">Not: {a.note}</div>}
+                                </div>
+                                <button onClick={() => cancelAppointment(a.id)} className="rounded-xl bg-red-400/10 px-3 py-2 text-xs text-red-300">İptal Et</button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div>
+                        <h4 className="mb-2 font-semibold text-zinc-200">Geçmiş / İptal Randevularım</h4>
+                        <div className="space-y-2">
+                          {myPastAppointments.length === 0 && <div className="rounded-2xl bg-black/30 p-3 text-sm text-zinc-300">Geçmiş randevunuz yok.</div>}
+                          {myPastAppointments.slice(0, 8).map((a) => (
+                            <div key={a.id} className="rounded-2xl bg-black/30 p-4">
+                              <div className="flex items-center justify-between gap-3">
+                                <div>
+                                  <b>{prettyDate(a.date)} · {a.time}</b>
+                                  <div className="text-sm text-zinc-400">{serviceMap[a.serviceId]?.name} · {staffMap[a.staffId]?.name}</div>
+                                </div>
+                                <Status value={a.status} />
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {customerPanel === "profile" && (
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <Input placeholder="Ad Soyad" value={profileForm.name} onChange={(e) => setProfileForm({ ...profileForm, name: e.target.value })} />
+                      <Input placeholder="Telefon" value={profileForm.phone} onChange={(e) => setProfileForm({ ...profileForm, phone: e.target.value })} />
+                      <Input placeholder="Kullanıcı adı" value={profileForm.username} onChange={(e) => setProfileForm({ ...profileForm, username: e.target.value })} />
+                      <Input type="password" placeholder="Şifre" value={profileForm.password} onChange={(e) => setProfileForm({ ...profileForm, password: e.target.value })} />
+                      <button onClick={updateCustomerProfile} className="rounded-2xl bg-amber-300 px-5 py-3 font-bold text-black md:col-span-2">Profili Kaydet</button>
+                    </div>
+                  )}
+                </div>
+              )}
             </Card>
 
             <Card className="h-fit lg:sticky lg:top-5">
-              <h2 className="text-2xl font-semibold">Randevu Özeti</h2>
-              <div className="mt-5 space-y-4 text-sm">
-                <div className="flex justify-between gap-4 border-b border-white/10 pb-3"><span className="text-zinc-400">Hizmet</span><b>{selectedService?.name}</b></div>
-                <div className="flex justify-between gap-4 border-b border-white/10 pb-3"><span className="text-zinc-400">Süre</span><b>{selectedService?.time} dk</b></div>
-                <div className="flex justify-between gap-4 border-b border-white/10 pb-3"><span className="text-zinc-400">Fiyat</span><b className="text-amber-200">{selectedService?.price} TL</b></div>
-                <div className="flex justify-between gap-4 border-b border-white/10 pb-3"><span className="text-zinc-400">Personel</span><b>{selectedStaff?.name}</b></div>
-                <div className="flex justify-between gap-4 border-b border-white/10 pb-3"><span className="text-zinc-400">Tarih</span><b>{prettyDate(date)}</b></div>
-                <div className="flex justify-between gap-4 border-b border-white/10 pb-3"><span className="text-zinc-400">Saat</span><b>{time}</b></div>
-              </div>
-              <button onClick={book} disabled={!availableSlots.length} className="mt-6 w-full rounded-2xl bg-amber-300 px-5 py-4 font-bold text-black shadow-xl shadow-amber-500/20 disabled:opacity-40">
-                Randevuyu Oluştur
-              </button>
-              <p className="mt-3 text-center text-xs text-zinc-500">Randevu admin paneline düşer.</p>
+              {currentCustomer ? (
+                <>
+                  <h2 className="text-2xl font-semibold">Randevu Özeti</h2>
+                  <div className="mt-5 space-y-4 text-sm">
+                    <div className="flex justify-between gap-4 border-b border-white/10 pb-3"><span className="text-zinc-400">Hizmet</span><b>{selectedService?.name}</b></div>
+                    <div className="flex justify-between gap-4 border-b border-white/10 pb-3"><span className="text-zinc-400">Süre</span><b>{selectedService?.time} dk</b></div>
+                    <div className="flex justify-between gap-4 border-b border-white/10 pb-3"><span className="text-zinc-400">Fiyat</span><b className="text-amber-200">{selectedService?.price} TL</b></div>
+                    <div className="flex justify-between gap-4 border-b border-white/10 pb-3"><span className="text-zinc-400">Personel</span><b>{selectedStaff?.name}</b></div>
+                    <div className="flex justify-between gap-4 border-b border-white/10 pb-3"><span className="text-zinc-400">Tarih</span><b>{prettyDate(date)}</b></div>
+                    <div className="flex justify-between gap-4 border-b border-white/10 pb-3"><span className="text-zinc-400">Saat</span><b>{time}</b></div>
+                  </div>
+                  <p className="mt-3 text-center text-xs text-zinc-500">Randevu admin paneline düşer.</p>
+                </>
+              ) : null}
             </Card>
           </section>
         </main>
@@ -986,11 +1090,243 @@ export default function MabelHairArt() {
               <div className="mb-6 grid gap-3 md:grid-cols-5"><Card><b>{data.appointments.filter((a) => a.date === todayISO(0)).length}</b><div className="text-sm text-zinc-400">Bugün</div></Card><Card><b>{data.appointments.filter((a) => a.status === "active").length}</b><div className="text-sm text-zinc-400">Aktif</div></Card><Card><b>{todayRevenue} TL</b><div className="text-sm text-zinc-400">Bugünkü Ciro</div></Card><Card><b>{totalRevenue} TL</b><div className="text-sm text-zinc-400">Toplam Ciro</div></Card><Card><b className="text-red-300">{totalDebt} TL</b><div className="text-sm text-zinc-400">Toplam Borç</div></Card></div>
               <div className="mb-6 flex flex-wrap gap-2">{[["appointments","Randevular"],["customers","Müşteriler"],["debts","Borçlar"],["revenue","Ciro"],["staff","Personel"],["availability","İzin/Kapalı"],["services","Hizmetler"],["settings","Ayarlar"]].map(([k,v]) => <button key={k} onClick={() => { setTab(k); setSelectedCustomerPhone(null); }} className={`rounded-full px-4 py-2 ${tab === k ? "bg-amber-300 text-black" : "bg-white/10"}`}>{v}</button>)}</div>
 
-              {tab === "appointments" && <Card><div className="mb-4 flex gap-3"><Search /><Input placeholder="Ara" value={search} onChange={(e) => setSearch(e.target.value)} /></div><div className="overflow-x-auto"><table className="w-full min-w-[850px] text-left text-sm"><thead className="text-zinc-400"><tr><th>Tarih</th><th>Müşteri</th><th>Hizmet</th><th>Personel</th><th>Durum</th><th>İşlem</th></tr></thead><tbody>{data.appointments.filter((a) => !search || (a.customerName + a.phone).toLowerCase().includes(search.toLowerCase())).map((a) => <tr key={a.id} className="border-t border-white/10"><td className="py-3">{prettyDate(a.date)} {a.time}</td><td><button onClick={() => { setTab("customers"); setSelectedCustomerPhone(a.phone); }} className="text-amber-300">{a.customerName}</button><div className="text-xs text-zinc-500">{a.phone}</div></td><td>{serviceMap[a.serviceId]?.name}<div className="text-xs text-zinc-500">Tarife {serviceMap[a.serviceId]?.price} TL</div>{Number(a.remainingDebt || 0) > 0 && <div className="text-xs text-red-300">Borç {a.remainingDebt} TL</div>}</td><td>{staffMap[a.staffId]?.name}</td><td><Status value={a.status} /></td><td className="flex flex-wrap gap-2 py-3"><a target="_blank" rel="noreferrer" href={wa(a.phone, msg(a))} className="rounded-xl bg-emerald-400/10 px-3 py-2 text-xs text-emerald-300"><MessageCircle className="mr-1 inline h-3 w-3" />WhatsApp</a><button onClick={() => openComplete(a)} className="rounded-xl bg-blue-400/10 px-3 py-2 text-xs text-blue-300"><Check className="mr-1 inline h-3 w-3" />Tamamla</button><button onClick={() => cancelAppointment(a.id)} className="rounded-xl bg-red-400/10 px-3 py-2 text-xs text-red-300"><X className="mr-1 inline h-3 w-3" />İptal</button><button onClick={() => deleteAppointment(a.id)} className="rounded-xl bg-white/10 px-3 py-2 text-xs"><Trash2 className="h-3 w-3" /></button></td></tr>)}</tbody></table></div></Card>}
+              {tab === "appointments" && <Card className="p-4 sm:p-5">
+                <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                  <div>
+                    <h2 className="text-2xl font-bold">Randevu Takvimi</h2>
+                    <p className="mt-1 text-sm text-zinc-400">Gün seç, o günün saat akışını tek ekranda gör.</p>
+                  </div>
+                  <div className="flex items-center gap-3 rounded-2xl border border-white/10 bg-black/30 px-3 py-2">
+                    <Search className="h-5 w-5 shrink-0 text-zinc-400" />
+                    <Input placeholder="Müşteri, telefon veya hizmet ara" value={search} onChange={(e) => setSearch(e.target.value)} className="w-full border-0 bg-transparent p-0 sm:w-72" />
+                  </div>
+                </div>
 
-              {tab === "customers" && <Card><div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between"><h2 className="text-2xl font-bold"><Users className="mr-2 inline text-amber-300" />Müşteriler</h2><div className="rounded-2xl border border-amber-300/20 bg-amber-300/10 px-4 py-3 text-sm"><span className="text-zinc-400">Toplam müşteri:</span> <b className="text-amber-200">{customers.length}</b></div></div>{!selectedCustomerPhone ? <><div className="mb-4 flex gap-3"><Search /><Input placeholder="Müşteri ara: ad veya telefon" value={customerSearch} onChange={(e) => setCustomerSearch(e.target.value)} className="w-full" /></div><div className="overflow-x-auto"><table className="w-full min-w-[650px] text-left text-sm"><thead className="text-zinc-400"><tr><th>Müşteri</th><th>Telefon</th><th>Randevu</th><th>Harcama</th><th>Borç</th><th></th></tr></thead><tbody>{filteredCustomers.map((c) => <tr key={c.phone} className="border-t border-white/10"><td className="py-3">{c.name}</td><td>{c.phone}</td><td>{c.count}</td><td>{c.spent} TL</td><td className="text-red-300">{c.debt} TL</td><td><button onClick={() => setSelectedCustomerPhone(c.phone)} className="rounded-xl bg-amber-300/10 px-3 py-2 text-xs text-amber-300">Detay</button></td></tr>)}</tbody></table>{filteredCustomers.length === 0 && <div className="rounded-2xl bg-black/30 p-4 text-sm text-zinc-300">Aramaya uygun müşteri bulunamadı.</div>}</div></> : <div><button onClick={() => setSelectedCustomerPhone(null)} className="mb-4 rounded-xl bg-white/10 px-3 py-2">Geri</button><div className="space-y-3">{customerAppointments.map((a) => <div key={a.id} className="rounded-2xl bg-black/30 p-4"><b>{prettyDate(a.date)} {a.time}</b><div className="text-sm text-zinc-400">{serviceMap[a.serviceId]?.name} · {staffMap[a.staffId]?.name}</div><div className="mt-1">Alınan: {a.paidAmount || 0} TL {Number(a.remainingDebt || 0) > 0 && <span className="ml-3 text-red-300">Borç: {a.remainingDebt} TL</span>}</div><Status value={a.status} /></div>)}</div></div>}</Card>}
+                <div className="no-scrollbar -mx-4 mb-5 overflow-x-auto px-4 pb-2 sm:-mx-5 sm:px-5">
+                  <div className="flex min-w-max gap-3">
+                    {adminDays.map((d) => (
+                      <button key={d.iso} onClick={() => setAdminDate(d.iso)} className={`w-32 shrink-0 rounded-2xl border p-4 text-left transition sm:w-40 ${adminDate === d.iso ? "border-amber-300 bg-amber-300 text-black shadow-lg shadow-amber-500/20" : "border-white/10 bg-black/30 text-zinc-200 hover:border-amber-300/40"}`}>
+                        <div className="text-2xl font-bold leading-none">{d.day}</div>
+                        <div className="mt-2 text-lg font-bold">{d.label}</div>
+                        <div className={`text-sm ${adminDate === d.iso ? "text-black/70" : "text-zinc-400"}`}>{d.month}</div>
+                        <div className={`mt-3 rounded-full px-2 py-1 text-center text-xs font-semibold ${adminDate === d.iso ? "bg-black/10 text-black" : "bg-white/10 text-zinc-300"}`}>{d.count} aktif</div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
 
-              {tab === "debts" && <Card><h2 className="mb-4 text-2xl font-bold"><CreditCard className="mr-2 inline text-red-300" />Borçlar - Toplam {totalDebt} TL</h2><div className="overflow-x-auto"><table className="w-full min-w-[700px] text-left text-sm"><thead className="text-zinc-400"><tr><th>Tarih</th><th>Müşteri</th><th>Hizmet</th><th>Alınan</th><th>Borç</th><th></th></tr></thead><tbody>{debtAppointments.map((a) => <tr key={a.id} className="border-t border-white/10"><td className="py-3">{prettyDate(a.date)} {a.time}</td><td>{a.customerName}<div className="text-xs text-zinc-500">{a.phone}</div></td><td>{serviceMap[a.serviceId]?.name}</td><td>{a.paidAmount || 0} TL</td><td className="font-bold text-red-300">{a.remainingDebt} TL</td><td><button onClick={() => setDebtPay({ id: a.id, amount: a.remainingDebt })} className="rounded-xl bg-emerald-400/10 px-3 py-2 text-xs text-emerald-300">Ödeme Al</button></td></tr>)}</tbody></table></div></Card>}
+                <div className="mb-4 flex flex-col gap-2 rounded-2xl border border-white/10 bg-black/20 p-4 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <div className="text-sm text-zinc-400">Seçili gün</div>
+                    <div className="text-xl font-bold">{prettyDate(adminDate)}</div>
+                  </div>
+                  <div className="text-sm text-zinc-400">{adminSchedule.filter((x) => x.appointment).length} randevu · {adminSchedule.filter((x) => !x.appointment).length} boş saat</div>
+                </div>
+
+                <div className="space-y-3">
+                  {adminSchedule.map(({ slot, end, appointment }) => appointment ? (
+                    <div key={`${slot}-${appointment.id}`} className={`rounded-2xl border p-4 ${appointment.status === "active" ? "border-amber-300/30 bg-amber-300/10" : appointment.status === "done" ? "border-blue-300/20 bg-blue-400/10" : "border-white/10 bg-white/[0.04]"}`}>
+                      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                        <div className="min-w-0">
+                          <div className="mb-2 flex flex-wrap items-center gap-2 text-sm text-zinc-400">
+                            <span className="font-semibold text-zinc-200">{slot}-{end}</span>
+                            <span>|</span>
+                            <span>{staffMap[appointment.staffId]?.name || "Personel"}</span>
+                            <Status value={appointment.status} />
+                          </div>
+                          <button onClick={() => { setTab("customers"); setSelectedCustomerPhone(appointment.phone); }} className="block max-w-full truncate text-left text-xl font-bold text-amber-200">{appointment.customerName}</button>
+                          <div className="mt-1 text-sm text-zinc-400">{serviceMap[appointment.serviceId]?.name} · {appointment.phone}</div>
+                          <div className="mt-2 flex flex-wrap gap-2 text-xs">
+                            <span className="rounded-full bg-black/30 px-3 py-1 text-zinc-300">Tarife {serviceMap[appointment.serviceId]?.price} TL</span>
+                            {Number(appointment.remainingDebt || 0) > 0 && <span className="rounded-full bg-red-400/10 px-3 py-1 text-red-300">Borç {appointment.remainingDebt} TL</span>}
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:justify-end">
+                          <a target="_blank" rel="noreferrer" href={wa(appointment.phone, msg(appointment))} className="rounded-xl bg-emerald-400/10 px-3 py-2 text-center text-xs font-semibold text-emerald-300"><MessageCircle className="mr-1 inline h-3 w-3" />WhatsApp</a>
+                          <button onClick={() => openComplete(appointment)} className="rounded-xl bg-blue-400/10 px-3 py-2 text-xs font-semibold text-blue-300"><Check className="mr-1 inline h-3 w-3" />Tamamla</button>
+                          <button onClick={() => cancelAppointment(appointment.id)} className="rounded-xl bg-red-400/10 px-3 py-2 text-xs font-semibold text-red-300"><X className="mr-1 inline h-3 w-3" />İptal</button>
+                          <button onClick={() => deleteAppointment(appointment.id)} className="rounded-xl bg-white/10 px-3 py-2 text-xs font-semibold"><Trash2 className="mr-1 inline h-3 w-3" />Sil</button>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div key={slot} className="flex items-center justify-between gap-3 rounded-2xl border border-emerald-300/20 bg-emerald-400/10 p-4">
+                      <div>
+                        <div className="text-sm font-semibold text-zinc-300">{slot}-{end}</div>
+                        <div className="mt-1 text-lg font-bold text-emerald-200">Boş</div>
+                      </div>
+                      <span className="rounded-xl bg-black/30 px-4 py-2 text-sm font-bold text-emerald-200">Müsait</span>
+                    </div>
+                  ))}
+                  {adminSchedule.length === 0 && <div className="rounded-2xl border border-white/10 bg-black/30 p-5 text-sm text-zinc-300">Aramaya uygun randevu bulunamadı.</div>}
+                </div>
+              </Card>}
+
+              {tab === "customers" && <Card className="p-4 sm:p-5">
+                <div className="mb-5 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                  <div>
+                    <h2 className="text-2xl font-bold"><Users className="mr-2 inline text-amber-300" />Müşteriler</h2>
+                    <p className="mt-1 text-sm text-zinc-400">Müşteri bilgileri, mevcut randevular ve geçmiş işlemler.</p>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2 text-center text-sm sm:flex">
+                    <div className="rounded-2xl border border-amber-300/20 bg-amber-300/10 px-3 py-2"><b className="block text-amber-200">{customers.length}</b><span className="text-xs text-zinc-400">Müşteri</span></div>
+                    <div className="rounded-2xl border border-white/10 bg-black/30 px-3 py-2"><b className="block text-emerald-300">{data.appointments.filter((a) => a.status === "active").length}</b><span className="text-xs text-zinc-400">Aktif</span></div>
+                    <div className="rounded-2xl border border-red-300/20 bg-red-400/10 px-3 py-2"><b className="block text-red-300">{totalDebt} TL</b><span className="text-xs text-zinc-400">Borç</span></div>
+                  </div>
+                </div>
+
+                {!selectedCustomerPhone ? (
+                  <>
+                    <div className="mb-4 flex items-center gap-3 rounded-2xl border border-white/10 bg-black/30 px-3 py-2">
+                      <Search className="h-5 w-5 shrink-0 text-zinc-400" />
+                      <Input placeholder="Müşteri ara: ad veya telefon" value={customerSearch} onChange={(e) => setCustomerSearch(e.target.value)} className="w-full border-0 bg-transparent p-0" />
+                    </div>
+
+                    <div className="grid gap-3 lg:grid-cols-2">
+                      {filteredCustomers.map((c) => {
+                        const activeCount = data.appointments.filter((a) => a.phone === c.phone && a.status === "active").length;
+                        return (
+                          <button key={c.phone} onClick={() => setSelectedCustomerPhone(c.phone)} className="rounded-2xl border border-white/10 bg-black/30 p-4 text-left transition hover:border-amber-300/40 hover:bg-amber-300/5">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="truncate text-lg font-bold text-white">{c.name}</div>
+                                <div className="mt-1 text-sm text-zinc-400">{c.phone}</div>
+                              </div>
+                              <span className="rounded-full bg-amber-300/10 px-3 py-1 text-xs font-semibold text-amber-200">Detay</span>
+                            </div>
+                            <div className="mt-4 grid grid-cols-3 gap-2 text-center text-xs">
+                              <div className="rounded-xl bg-white/[0.05] px-2 py-2"><b className="block text-zinc-100">{c.count}</b><span className="text-zinc-500">Toplam</span></div>
+                              <div className="rounded-xl bg-emerald-400/10 px-2 py-2"><b className="block text-emerald-300">{activeCount}</b><span className="text-zinc-500">Aktif</span></div>
+                              <div className="rounded-xl bg-red-400/10 px-2 py-2"><b className="block text-red-300">{c.debt} TL</b><span className="text-zinc-500">Borç</span></div>
+                            </div>
+                            <div className="mt-3 flex items-center justify-between text-sm text-zinc-400">
+                              <span>Harcama</span>
+                              <b className="text-amber-200">{c.spent} TL</b>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {filteredCustomers.length === 0 && <div className="rounded-2xl bg-black/30 p-5 text-sm text-zinc-300">Aramaya uygun müşteri bulunamadı.</div>}
+                  </>
+                ) : (
+                  <div>
+                    <button onClick={() => setSelectedCustomerPhone(null)} className="mb-4 rounded-xl bg-white/10 px-4 py-2 text-sm font-semibold">Geri</button>
+
+                    <div className="grid gap-4 lg:grid-cols-[340px_1fr]">
+                      <div className="h-fit rounded-2xl border border-amber-300/20 bg-amber-300/10 p-5">
+                        <div className="text-sm text-amber-200">Müşteri Profili</div>
+                        <h3 className="mt-2 text-2xl font-bold">{selectedCustomer?.name || "Müşteri"}</h3>
+                        <div className="mt-1 text-sm text-zinc-300">{selectedCustomerPhone}</div>
+                        <div className="mt-5 grid grid-cols-2 gap-2 text-center text-sm">
+                          <div className="rounded-xl bg-black/30 px-3 py-3"><b className="block text-white">{selectedCustomer?.count || 0}</b><span className="text-xs text-zinc-400">Randevu</span></div>
+                          <div className="rounded-xl bg-black/30 px-3 py-3"><b className="block text-emerald-300">{selectedCustomerActiveAppointments.length}</b><span className="text-xs text-zinc-400">Mevcut</span></div>
+                          <div className="rounded-xl bg-black/30 px-3 py-3"><b className="block text-amber-200">{selectedCustomer?.spent || 0} TL</b><span className="text-xs text-zinc-400">Harcama</span></div>
+                          <div className="rounded-xl bg-black/30 px-3 py-3"><b className="block text-red-300">{selectedCustomer?.debt || 0} TL</b><span className="text-xs text-zinc-400">Borç</span></div>
+                        </div>
+                        <a target="_blank" rel="noreferrer" href={wa(selectedCustomerPhone, "Merhaba, Mabel Hair Art randevunuz hakkında iletişime geçiyoruz.")} className="mt-4 block rounded-2xl bg-emerald-400/10 px-4 py-3 text-center font-semibold text-emerald-300"><MessageCircle className="mr-2 inline h-4 w-4" />WhatsApp</a>
+                      </div>
+
+                      <div className="space-y-5">
+                        <div>
+                          <h3 className="mb-3 text-xl font-bold text-emerald-200">Mevcut Randevular</h3>
+                          <div className="space-y-3">
+                            {selectedCustomerActiveAppointments.length === 0 && <div className="rounded-2xl bg-black/30 p-4 text-sm text-zinc-300">Mevcut randevu yok.</div>}
+                            {selectedCustomerActiveAppointments.map((a) => (
+                              <div key={a.id} className="rounded-2xl border border-emerald-300/20 bg-emerald-400/10 p-4">
+                                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                                  <div>
+                                    <b>{prettyDate(a.date)} · {a.time}</b>
+                                    <div className="mt-1 text-sm text-zinc-300">{serviceMap[a.serviceId]?.name} · {staffMap[a.staffId]?.name}</div>
+                                    {a.note && <div className="mt-1 text-xs text-zinc-500">Not: {a.note}</div>}
+                                  </div>
+                                  <div className="flex flex-wrap gap-2">
+                                    <button onClick={() => openComplete(a)} className="rounded-xl bg-blue-400/10 px-3 py-2 text-xs font-semibold text-blue-300">Tamamla</button>
+                                    <button onClick={() => cancelAppointment(a.id)} className="rounded-xl bg-red-400/10 px-3 py-2 text-xs font-semibold text-red-300">İptal</button>
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div>
+                          <h3 className="mb-3 text-xl font-bold">Geçmiş / İptal Randevular</h3>
+                          <div className="space-y-3">
+                            {selectedCustomerPastAppointments.length === 0 && <div className="rounded-2xl bg-black/30 p-4 text-sm text-zinc-300">Geçmiş randevu yok.</div>}
+                            {selectedCustomerPastAppointments.map((a) => (
+                              <div key={a.id} className="rounded-2xl border border-white/10 bg-black/30 p-4">
+                                <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                                  <div>
+                                    <b>{prettyDate(a.date)} · {a.time}</b>
+                                    <div className="mt-1 text-sm text-zinc-400">{serviceMap[a.serviceId]?.name} · {staffMap[a.staffId]?.name}</div>
+                                    <div className="mt-2 text-sm">Alınan: {a.paidAmount || 0} TL {Number(a.remainingDebt || 0) > 0 && <span className="ml-2 text-red-300">Borç: {a.remainingDebt} TL</span>}</div>
+                                  </div>
+                                  <Status value={a.status} />
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </Card>}
+
+              {tab === "debts" && <Card className="p-4 sm:p-5">
+                <div className="mb-5 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                  <div>
+                    <h2 className="text-2xl font-bold"><CreditCard className="mr-2 inline text-red-300" />Borçlar</h2>
+                    <p className="mt-1 text-sm text-zinc-400">Aynı müşterinin borçları tek toplam altında takip edilir.</p>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 text-center text-sm sm:flex">
+                    <div className="rounded-2xl border border-red-300/20 bg-red-400/10 px-4 py-3"><b className="block text-red-300">{totalDebt} TL</b><span className="text-xs text-zinc-400">Toplam Borç</span></div>
+                    <div className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3"><b className="block text-white">{debtGroups.length}</b><span className="text-xs text-zinc-400">Borçlu Müşteri</span></div>
+                  </div>
+                </div>
+
+                <div className="grid gap-4 xl:grid-cols-2">
+                  {debtGroups.map((group) => (
+                    <div key={group.phone || group.name} className="rounded-2xl border border-red-300/20 bg-red-400/10 p-4">
+                      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                        <div className="min-w-0">
+                          <button onClick={() => { setTab("customers"); setSelectedCustomerPhone(group.phone); }} className="block max-w-full truncate text-left text-xl font-bold text-white">{group.name}</button>
+                          <div className="mt-1 text-sm text-zinc-400">{group.phone}</div>
+                        </div>
+                        <div className="rounded-2xl bg-black/30 px-4 py-3 text-left sm:text-right">
+                          <div className="text-xs text-zinc-400">Mevcut borç</div>
+                          <div className="text-2xl font-bold text-red-300">{group.totalDebt} TL</div>
+                        </div>
+                      </div>
+
+                      <div className="mt-4 grid grid-cols-2 gap-2 text-center text-sm">
+                        <div className="rounded-xl bg-black/30 px-3 py-2"><b className="block text-zinc-100">{group.count}</b><span className="text-xs text-zinc-400">Borç kaydı</span></div>
+                        <div className="rounded-xl bg-black/30 px-3 py-2"><b className="block text-amber-200">{group.paidAmount} TL</b><span className="text-xs text-zinc-400">Alınan</span></div>
+                      </div>
+
+                      <div className="mt-4 space-y-2">
+                        {group.appointments.map((a) => (
+                          <div key={a.id} className="rounded-xl border border-white/10 bg-black/25 p-3 text-sm">
+                            <div className="flex items-start justify-between gap-3">
+                              <div>
+                                <b>{prettyDate(a.date)} · {a.time}</b>
+                                <div className="mt-1 text-zinc-400">{serviceMap[a.serviceId]?.name} · {staffMap[a.staffId]?.name}</div>
+                              </div>
+                              <div className="shrink-0 text-right font-bold text-red-300">{a.remainingDebt} TL</div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+
+                      <button onClick={() => setDebtPay({ phone: group.phone, name: group.name, amount: group.totalDebt, totalDebt: group.totalDebt, appointments: group.appointments })} className="mt-4 w-full rounded-2xl bg-amber-300 px-4 py-3 font-bold text-black">Ödeme Al</button>
+                    </div>
+                  ))}
+                </div>
+
+                {debtGroups.length === 0 && <div className="rounded-2xl border border-emerald-300/20 bg-emerald-400/10 p-5 text-sm text-emerald-200">Açık borç bulunmuyor.</div>}
+              </Card>}
 
               {tab === "revenue" && <Card>
                 <h2 className="mb-6 text-3xl font-bold">Ciro Analizi</h2>
@@ -1136,7 +1472,7 @@ export default function MabelHairArt() {
       )}
 
       {complete && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"><Card className="w-full max-w-md"><h2 className="mb-3 text-2xl font-bold">Randevuyu Tamamla</h2><Select value={complete.paymentStatus} onChange={(e) => { const st = e.target.value; setComplete({...complete, paymentStatus:st, amount: st === "debt" ? 0 : complete.amount, remainingDebt: st === "debt" ? complete.tariff : st === "paid" ? 0 : complete.remainingDebt}); }} className="mb-3 w-full"><option value="paid">Ödendi</option><option value="partial">Kısmi ödeme</option><option value="debt">Veresiye</option></Select><Input type="number" value={complete.amount} onChange={(e)=>setComplete({...complete,amount:e.target.value})} placeholder="Alınan ücret" className="mb-3 w-full" /><Input type="number" value={complete.remainingDebt} onChange={(e)=>setComplete({...complete,remainingDebt:e.target.value})} placeholder="Kalan borç" className="mb-3 w-full" /><div className="flex gap-2"><button onClick={saveComplete} className="flex-1 rounded-2xl bg-amber-300 px-4 py-3 font-bold text-black">Kaydet</button><button onClick={()=>setComplete(null)} className="rounded-2xl bg-white/10 px-4 py-3">Vazgeç</button></div></Card></div>}
-      {debtPay && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"><Card className="w-full max-w-md"><h2 className="mb-3 text-2xl font-bold">Borç Ödemesi</h2><Input type="number" value={debtPay.amount} onChange={(e)=>setDebtPay({...debtPay,amount:e.target.value})} className="mb-3 w-full" /><div className="flex gap-2"><button onClick={payDebt} className="flex-1 rounded-2xl bg-amber-300 px-4 py-3 font-bold text-black">Ödemeyi Kaydet</button><button onClick={()=>setDebtPay(null)} className="rounded-2xl bg-white/10 px-4 py-3">Vazgeç</button></div></Card></div>}
+      {debtPay && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"><Card className="w-full max-w-md"><h2 className="mb-1 text-2xl font-bold">Borç Ödemesi</h2><p className="mb-4 text-sm text-zinc-400">{debtPay.name || "Müşteri"} · Toplam borç {debtPay.totalDebt || debtPay.amount} TL</p><Input type="number" min="0" max={debtPay.totalDebt || debtPay.amount} value={debtPay.amount} onChange={(e)=>setDebtPay({...debtPay,amount:e.target.value})} className="mb-3 w-full" /><div className="flex gap-2"><button onClick={payDebt} className="flex-1 rounded-2xl bg-amber-300 px-4 py-3 font-bold text-black">Ödemeyi Kaydet</button><button onClick={()=>setDebtPay(null)} className="rounded-2xl bg-white/10 px-4 py-3">Vazgeç</button></div></Card></div>}
     </div>
   );
 }
