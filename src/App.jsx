@@ -3,6 +3,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Scissors, Search, Plus, Trash2, Check, X, MessageCircle, CreditCard, Users, Settings, CalendarDays, Clock, LogOut, Lock, UserPlus, UserRound } from "lucide-react";
 import { supabase } from "./supabase";
 const LS_KEY = "mabel_hair_art_clean_v1";
+const CUSTOMER_SESSION_KEY = "mabel_hair_art_customer_session_v1";
 const ADMIN_PIN = "Hardiler1";
 
 const defaultServices = [
@@ -129,6 +130,8 @@ export default function MabelHairArt() {
   const [view, setView] = useState("customer");
   const [customerAuthMode, setCustomerAuthMode] = useState("login");
   const [currentCustomer, setCurrentCustomer] = useState(null);
+  const [customerPanel, setCustomerPanel] = useState("booking");
+  const [profileForm, setProfileForm] = useState({ name: "", phone: "", username: "", password: "" });
   const [customerLogin, setCustomerLogin] = useState({ username: "", password: "" });
   const [customerRegister, setCustomerRegister] = useState({ username: "", password: "", phone: "", name: "" });
   const [logged, setLogged] = useState(false);
@@ -271,6 +274,38 @@ export default function MabelHairArt() {
     };
   }, []);
 
+
+  useEffect(() => {
+    const saved = localStorage.getItem(CUSTOMER_SESSION_KEY);
+    if (!saved || currentCustomer) return;
+
+    try {
+      const session = JSON.parse(saved);
+      const acc = (data.customerAccounts || []).find((u) => u.id === session.id || u.username === session.username);
+      if (acc) {
+        setCurrentCustomer(acc);
+        setCustomerName(acc.name || "");
+        setPhone(acc.phone || "");
+        setProfileForm({
+          name: acc.name || "",
+          phone: acc.phone || "",
+          username: acc.username || "",
+          password: acc.password || "",
+        });
+      }
+    } catch {}
+  }, [data.customerAccounts, currentCustomer]);
+
+  useEffect(() => {
+    if (!currentCustomer) return;
+    setProfileForm({
+      name: currentCustomer.name || "",
+      phone: currentCustomer.phone || "",
+      username: currentCustomer.username || "",
+      password: currentCustomer.password || "",
+    });
+  }, [currentCustomer?.id]);
+
   const adminStateJson = JSON.stringify(adminStatePayload());
 
   useEffect(() => {
@@ -364,6 +399,14 @@ export default function MabelHairArt() {
   const debtAppointments = data.appointments.filter((a) => Number(a.remainingDebt || 0) > 0);
   const todayCount = data.appointments.filter((a) => a.date === todayISO(0) && a.status === "active").length;
   const density = todayCount <= 2 ? { text: "Bugün sakin", desc: "Rahat saatler mevcut", pct: 28 } : todayCount <= 5 ? { text: "Bugün orta yoğun", desc: "Uygun saatler azalıyor", pct: 58 } : { text: "Bugün yoğun", desc: "Erken randevu almanız önerilir", pct: 88 };
+  const myAppointments = currentCustomer
+    ? data.appointments
+        .filter((a) => a.phone === currentCustomer.phone)
+        .sort((a, b) => `${b.date} ${b.time}`.localeCompare(`${a.date} ${a.time}`))
+    : [];
+  const myActiveAppointments = myAppointments.filter((a) => a.status === "active" && new Date(`${a.date}T${a.time}:00`) >= new Date());
+  const myPastAppointments = myAppointments.filter((a) => a.status !== "active" || new Date(`${a.date}T${a.time}:00`) < new Date());
+
 
   async function addAppointment(payload) {
     if (!payload.customerName || normPhone(payload.phone).length < 10) return alert("Ad ve telefon girin.");
@@ -438,6 +481,66 @@ export default function MabelHairArt() {
     }
   }
 
+
+  function saveCustomerSession(acc) {
+    localStorage.setItem(CUSTOMER_SESSION_KEY, JSON.stringify({ id: acc.id, username: acc.username }));
+  }
+
+  function logoutCustomer() {
+    localStorage.removeItem(CUSTOMER_SESSION_KEY);
+    setCurrentCustomer(null);
+    setCustomerPanel("booking");
+  }
+
+  async function updateCustomerProfile() {
+    if (!currentCustomer) return;
+    if (!profileForm.username || !profileForm.password || normPhone(profileForm.phone).length < 10) {
+      return alert("Kullanıcı adı, şifre ve telefon zorunlu.");
+    }
+
+    const normalizedPhone = normPhone(profileForm.phone);
+    const usernameTaken = (data.customerAccounts || []).some((u) => u.username === profileForm.username && u.id !== currentCustomer.id);
+    if (usernameTaken) return alert("Bu kullanıcı adı başka müşteri tarafından kullanılıyor.");
+
+    const updated = {
+      ...currentCustomer,
+      name: profileForm.name || profileForm.username,
+      phone: normalizedPhone,
+      username: profileForm.username,
+      password: profileForm.password,
+    };
+
+    const oldPhone = currentCustomer.phone;
+
+    if (oldPhone !== updated.phone || currentCustomer.name !== updated.name) {
+      const { error } = await supabase
+        .from("appointments")
+        .update({
+          customer_name: updated.name,
+          phone: updated.phone,
+        })
+        .eq("phone", oldPhone);
+
+      if (error) {
+        console.log("Profile appointment update error:", error);
+        alert("Profil randevulara işlenemedi. Console hatasına bak.");
+        return;
+      }
+    }
+
+    setData((d) => ({
+      ...d,
+      customerAccounts: (d.customerAccounts || []).map((u) => u.id === currentCustomer.id ? updated : u),
+      appointments: d.appointments.map((a) => a.phone === oldPhone ? { ...a, customerName: updated.name, phone: updated.phone } : a),
+    }));
+    setCurrentCustomer(updated);
+    setCustomerName(updated.name);
+    setPhone(updated.phone);
+    saveCustomerSession(updated);
+    loadRemoteAppointments();
+    alert("Profil güncellendi.");
+  }
+
   function registerCustomer() {
     if (!customerRegister.username || !customerRegister.password || normPhone(customerRegister.phone).length < 10) return alert("Kullanıcı adı, şifre ve telefon zorunlu.");
     if ((data.customerAccounts || []).some((u) => u.username === customerRegister.username)) return alert("Bu kullanıcı adı zaten var.");
@@ -446,6 +549,8 @@ export default function MabelHairArt() {
     setCurrentCustomer(acc);
     setCustomerName(acc.name);
     setPhone(acc.phone);
+    setProfileForm({ name: acc.name, phone: acc.phone, username: acc.username, password: acc.password });
+    saveCustomerSession(acc);
   }
 
   function loginCustomer() {
@@ -454,6 +559,8 @@ export default function MabelHairArt() {
     setCurrentCustomer(acc);
     setCustomerName(acc.name);
     setPhone(acc.phone);
+    setProfileForm({ name: acc.name || "", phone: acc.phone || "", username: acc.username || "", password: acc.password || "" });
+    saveCustomerSession(acc);
   }
 
   function openComplete(a) {
@@ -740,9 +847,69 @@ export default function MabelHairArt() {
                         <div className="font-semibold text-emerald-200">{currentCustomer.name}</div>
                         <div className="text-sm text-zinc-300">{currentCustomer.phone}</div>
                       </div>
-                      <button onClick={() => setCurrentCustomer(null)} className="rounded-xl bg-black/30 px-3 py-2 text-xs">Çıkış</button>
+                      <button onClick={logoutCustomer} className="rounded-xl bg-black/30 px-3 py-2 text-xs">Çıkış</button>
                     </div>
-                    <Textarea placeholder="Not / İstek" value={note} onChange={(e) => setNote(e.target.value)} className="mt-4 min-h-24 w-full py-4" />
+
+                    <div className="mt-4 flex flex-wrap gap-2">
+                      <button onClick={() => setCustomerPanel("booking")} className={`rounded-full px-4 py-2 text-sm ${customerPanel === "booking" ? "bg-amber-300 text-black" : "bg-black/30 text-zinc-200"}`}>Randevu Notu</button>
+                      <button onClick={() => setCustomerPanel("appointments")} className={`rounded-full px-4 py-2 text-sm ${customerPanel === "appointments" ? "bg-amber-300 text-black" : "bg-black/30 text-zinc-200"}`}>Randevularım</button>
+                      <button onClick={() => setCustomerPanel("profile")} className={`rounded-full px-4 py-2 text-sm ${customerPanel === "profile" ? "bg-amber-300 text-black" : "bg-black/30 text-zinc-200"}`}>Profilim</button>
+                    </div>
+
+                    {customerPanel === "booking" && (
+                      <Textarea placeholder="Not / İstek" value={note} onChange={(e) => setNote(e.target.value)} className="mt-4 min-h-24 w-full py-4" />
+                    )}
+
+                    {customerPanel === "appointments" && (
+                      <div className="mt-4 space-y-4">
+                        <div>
+                          <h4 className="mb-2 font-semibold text-emerald-200">Aktif Randevularım</h4>
+                          <div className="space-y-2">
+                            {myActiveAppointments.length === 0 && <div className="rounded-2xl bg-black/30 p-3 text-sm text-zinc-300">Aktif randevunuz yok.</div>}
+                            {myActiveAppointments.map((a) => (
+                              <div key={a.id} className="rounded-2xl bg-black/30 p-4">
+                                <div className="flex items-start justify-between gap-3">
+                                  <div>
+                                    <b>{prettyDate(a.date)} · {a.time}</b>
+                                    <div className="text-sm text-zinc-400">{serviceMap[a.serviceId]?.name} · {staffMap[a.staffId]?.name}</div>
+                                    {a.note && <div className="mt-1 text-xs text-zinc-500">Not: {a.note}</div>}
+                                  </div>
+                                  <button onClick={() => cancelAppointment(a.id)} className="rounded-xl bg-red-400/10 px-3 py-2 text-xs text-red-300">İptal Et</button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div>
+                          <h4 className="mb-2 font-semibold text-zinc-200">Geçmiş / İptal Randevularım</h4>
+                          <div className="space-y-2">
+                            {myPastAppointments.length === 0 && <div className="rounded-2xl bg-black/30 p-3 text-sm text-zinc-300">Geçmiş randevunuz yok.</div>}
+                            {myPastAppointments.slice(0, 8).map((a) => (
+                              <div key={a.id} className="rounded-2xl bg-black/30 p-4">
+                                <div className="flex items-center justify-between gap-3">
+                                  <div>
+                                    <b>{prettyDate(a.date)} · {a.time}</b>
+                                    <div className="text-sm text-zinc-400">{serviceMap[a.serviceId]?.name} · {staffMap[a.staffId]?.name}</div>
+                                  </div>
+                                  <Status value={a.status} />
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {customerPanel === "profile" && (
+                      <div className="mt-4 grid gap-3 md:grid-cols-2">
+                        <Input placeholder="Ad Soyad" value={profileForm.name} onChange={(e) => setProfileForm({ ...profileForm, name: e.target.value })} />
+                        <Input placeholder="Telefon" value={profileForm.phone} onChange={(e) => setProfileForm({ ...profileForm, phone: e.target.value })} />
+                        <Input placeholder="Kullanıcı adı" value={profileForm.username} onChange={(e) => setProfileForm({ ...profileForm, username: e.target.value })} />
+                        <Input type="password" placeholder="Şifre" value={profileForm.password} onChange={(e) => setProfileForm({ ...profileForm, password: e.target.value })} />
+                        <button onClick={updateCustomerProfile} className="rounded-2xl bg-amber-300 px-5 py-3 font-bold text-black md:col-span-2">Profili Kaydet</button>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
