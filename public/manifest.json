@@ -1,0 +1,25 @@
+{
+  "name": "Mabel Hair Art Admin",
+  "short_name": "Mabel Admin",
+  "description": "Mabel Hair Art admin panel uygulaması",
+  "start_url": "/?admin=1",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#080808",
+  "theme_color": "#fcd34d",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
