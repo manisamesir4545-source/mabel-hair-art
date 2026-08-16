@@ -1,9 +1,131 @@
 @import "tailwindcss";
 
+html,
+body,
+#root {
+  width: 100%;
+  min-height: 100%;
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+html {
+  background: #080808;
+}
+
+body {
+  margin: 0;
+  background: #080808;
+  color: #fff;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+#root:empty {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  background:
+    radial-gradient(circle at top, rgba(252, 211, 77, 0.16), transparent 34rem),
+    #080808;
+}
+
+#root:empty::before {
+  content: "Mabel Hair Art";
+  color: #fcd34d;
+  font-size: 1.35rem;
+  font-weight: 900;
+  letter-spacing: 0;
+}
+
+@supports (-webkit-touch-callout: none) {
+  html,
+  body,
+  #root {
+    min-height: -webkit-fill-available;
+  }
+}
+
+* {
+  box-sizing: border-box;
+  scrollbar-color: transparent transparent;
+  scrollbar-width: thin;
+}
+
 .no-scrollbar {
-  scrollbar-width: none;
+  scrollbar-width: thin;
 }
 
 .no-scrollbar::-webkit-scrollbar {
-  display: none;
+  display: block;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  border-radius: 999px;
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  min-height: 48px;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+}
+
+*:hover {
+  scrollbar-color: rgba(250, 204, 21, 0.7) rgba(255, 255, 255, 0.035);
+}
+
+*:hover::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.035);
+}
+
+*:hover::-webkit-scrollbar-thumb {
+  border-color: rgba(8, 8, 8, 0.92);
+  background: linear-gradient(180deg, rgba(255, 210, 46, 0.86), rgba(147, 101, 9, 0.82));
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, rgba(255, 215, 64, 1), rgba(202, 138, 4, 0.95));
+}
+
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+.app-scrollbar {
+  scrollbar-gutter: stable;
+}
+
+.app-scrollbar:focus-within {
+  scrollbar-color: rgba(250, 204, 21, 0.7) rgba(255, 255, 255, 0.035);
+}
+
+.customer-date-scroll {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  contain: inline-size;
+  -webkit-overflow-scrolling: touch;
+}
+
+@media (max-width: 767px) and (orientation: portrait) {
+  .revenue-flow-fullscreen {
+    width: 100dvh;
+    min-width: 100dvh;
+    height: 100dvw;
+    min-height: 100dvw;
+    max-height: 100dvw;
+    overflow-y: auto;
+    transform: rotate(90deg) translateY(-100%);
+    transform-origin: top left;
+  }
 }

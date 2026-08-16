@@ -182,3 +182,16 @@
     border-right-color: var(--border);
   }
 }
+
+@media (max-width: 767px) and (orientation: portrait) {
+  .revenue-flow-fullscreen {
+    width: 100dvh;
+    min-width: 100dvh;
+    height: 100dvw;
+    min-height: 100dvw;
+    max-height: 100dvw;
+    overflow-y: auto;
+    transform: rotate(90deg) translateY(-100%);
+    transform-origin: top left;
+  }
+}
