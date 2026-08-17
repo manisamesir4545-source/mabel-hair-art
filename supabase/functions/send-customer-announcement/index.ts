@@ -55,6 +55,21 @@ function firstRow<T>(value: T | T[] | null): T | null {
   return Array.isArray(value) ? value[0] || null : value;
 }
 
+function safeDiagnostic(error: unknown) {
+  const source = error && typeof error === "object"
+    ? error as Record<string, unknown>
+    : {};
+  const rawCode = typeof source.code === "string" ? source.code : "";
+  const rawStatus = typeof source.status === "number" ? source.status : 0;
+
+  return {
+    code: /^[a-z0-9_]{1,32}$/i.test(rawCode) ? rawCode.toUpperCase() : null,
+    status: Number.isInteger(rawStatus) && rawStatus >= 400 && rawStatus <= 599
+      ? rawStatus
+      : null,
+  };
+}
+
 function isValidPhone(phone: string) {
   return /^[1-9][0-9]{7,14}$/.test(phone);
 }
@@ -370,13 +385,16 @@ Deno.serve(async (req) => {
     }, 503);
   }
 
+  let diagnosticStage = "load_recipients";
   try {
     const recipientData = await loadRecipients(supabase);
+    diagnosticStage = "load_campaign_state";
     const [summary, campaign] = await Promise.all([
       campaignSummary(supabase, recipientData.recipients),
       loadCampaign(supabase),
     ]);
 
+    diagnosticStage = "template_approval";
     let approval: WhatsAppTemplateApproval;
     try {
       approval = await getTemplateApproval(TEMPLATE_NAME);
@@ -427,6 +445,7 @@ Deno.serve(async (req) => {
       });
     }
 
+    diagnosticStage = "claim_campaign";
     const { data: claimData, error: claimError } = await supabase.rpc(
       "claim_broadcast_campaign",
       {
@@ -520,10 +539,11 @@ Deno.serve(async (req) => {
           : "Duyuru gönderimi tamamlandı.",
       });
     } catch (error) {
-      console.error(
-        "announcement send failed",
-        error instanceof Error ? error.message : "unknown error",
-      );
+      console.error("announcement send failed", {
+        action,
+        stage: "process_recipients",
+        ...safeDiagnostic(error),
+      });
       const failedSummary = await campaignSummary(
         supabase,
         recipientData.recipients,
@@ -550,13 +570,17 @@ Deno.serve(async (req) => {
       }, 500);
     }
   } catch (error) {
-    console.error(
-      "send-customer-announcement failed",
-      error instanceof Error ? error.message : "unknown error",
-    );
+    const diagnostic = safeDiagnostic(error);
+    console.error("send-customer-announcement failed", {
+      action,
+      stage: diagnosticStage,
+      ...diagnostic,
+    });
     return adminJson(req, {
       ok: false,
       error: "Duyuru hizmeti şu anda kullanılamıyor.",
+      diagnosticCode: diagnostic.code,
+      diagnosticStage,
     }, 503);
   }
 });

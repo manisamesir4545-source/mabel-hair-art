@@ -60,7 +60,13 @@ async function edgeFunctionErrorMessage(error, fallback) {
   try {
     const readableResponse = response?.clone ? response.clone() : response;
     const payload = await readableResponse?.json?.();
-    if (payload?.error || payload?.message) return String(payload.error || payload.message);
+    if (payload?.error || payload?.message) {
+      const message = String(payload.error || payload.message);
+      const code = String(payload.diagnosticCode || "").toUpperCase();
+      return /^[A-Z0-9_]{1,32}$/.test(code)
+        ? `${message} (Hata kodu: ${code})`
+        : message;
+    }
   } catch {
     // Some function clients expose an already-consumed Response body.
   }
@@ -1260,13 +1266,18 @@ export default function MabelHairArt() {
       })
       .catch((error) => {
         if (disposed) return;
-        sessionStorage.removeItem(ADMIN_SESSION_KEY);
-        setAdminSessionToken("");
-        setAdminSessionValidated(false);
-        setAnnouncementStatus(null);
-        const message = error.status === 401 || error.status === 403
-          ? "Yönetici oturumunuzun süresi doldu. Lütfen yeniden giriş yapın."
-          : "Yönetici oturumu doğrulanamadı. Lütfen PIN ile yeniden giriş yapın.";
+        if (error.status === 401 || error.status === 403) {
+          sessionStorage.removeItem(ADMIN_SESSION_KEY);
+          setAdminSessionToken("");
+          setAdminSessionValidated(false);
+          setAnnouncementStatus(null);
+          setNotice({ message: "Yönetici oturumunuzun süresi doldu. Lütfen yeniden giriş yapın.", tone: "error" });
+          return;
+        }
+
+        setAdminSessionValidated(true);
+        const message = error.message || "Duyuru durumu alınamadı. Durumu yenileyip tekrar deneyin.";
+        setAnnouncementError(message);
         setNotice({ message, tone: "error" });
       })
       .finally(() => {
