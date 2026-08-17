@@ -53,7 +53,7 @@ Son deploy:
 - Production site: https://mabelhairart.com.tr
 - Supabase project ref: `qtyehohkrnxudeeeuuyy`
 
-## Guvenli musteri duyurusu (18 Agustos 2026)
+## Guvenli musteri duyurusu (19 Agustos 2026)
 
 Sabit kampanya ayarlari Edge Function icindedir; istemci telefon, alici, template veya
 kampanya kimligi gonderemez:
@@ -61,7 +61,7 @@ kampanya kimligi gonderemez:
 - Template: `mabel_calisma_bilgisi_v2`
 - Dil: `tr`
 - Campaign ID: `mabel_reopening_2026_08_18_v2`
-- Body parametreleri: musteri adi ve `18 Ağustos 2026`
+- Body parametreleri: musteri adi ve `19 Ağustos 2026`
 
 Meta WhatsApp Manager'da template'in ayni ad/dil ile `APPROVED` olmasi gerekir.
 Edge Function her `status` ve `send` isteginde WABA `message_templates` endpointinden
