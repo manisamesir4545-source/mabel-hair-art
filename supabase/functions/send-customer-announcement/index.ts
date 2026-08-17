@@ -14,7 +14,7 @@ import {
 
 const CAMPAIGN_ID = "mabel_reopening_2026_08_18_v2";
 const TEMPLATE_NAME = "mabel_calisma_bilgisi_v2";
-const ANNOUNCEMENT_DATE = "18 Ağustos 2026";
+const ANNOUNCEMENT_DATE = "19 Ağustos 2026";
 const LEASE_SECONDS = 15 * 60;
 const MAX_BODY_LENGTH = 1024;
 const PAGE_SIZE = 1000;
