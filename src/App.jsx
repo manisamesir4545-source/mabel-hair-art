@@ -6,6 +6,7 @@ const LS_KEY = "mabel_hair_art_clean_v1";
 const CUSTOMER_SESSION_KEY = "mabel_hair_art_customer_session_v1";
 const ADMIN_SESSION_KEY = "mabel_hair_art_admin_session_v1";
 const DEBT_CONTACT_PHONE = "05411731405";
+const ANNOUNCEMENT_DATE_LABEL = "19 Ağustos 2026";
 const MAX_UNPAID_DEBT_APPOINTMENTS = 1;
 const REMOTE_ERROR_LOG_INTERVAL = 60_000;
 const REMOTE_OK_POLL_INTERVAL = 5_000;
@@ -1984,7 +1985,7 @@ export default function MabelHairArt() {
 
     askConfirm({
       title: "WhatsApp duyurusu gönderilsin mi?",
-      message: `${announcementSummary.pending} müşteriye 18 Ağustos 2026 tarihli yeni adres duyurusu gönderilecek. Gönderim başladıktan sonra bu kampanya kapsamında aynı müşteriye ikinci kez mesaj gönderilmez. Yalnızca WhatsApp üzerinden iletişim izni bulunan müşterilere gönderdiğinizi onaylıyorsunuz.`,
+      message: `${announcementSummary.pending} müşteriye ${ANNOUNCEMENT_DATE_LABEL} tarihli yeni adres duyurusu gönderilecek. Gönderim başladıktan sonra bu kampanya kapsamında aynı müşteriye ikinci kez mesaj gönderilmez. Yalnızca WhatsApp üzerinden iletişim izni bulunan müşterilere gönderdiğinizi onaylıyorsunuz.`,
       confirmText: `${announcementSummary.pending} müşteriye gönder`,
       onConfirm: sendCustomerAnnouncement,
     });
@@ -3422,7 +3423,7 @@ export default function MabelHairArt() {
                       <div className="mt-4 space-y-3 rounded-2xl border border-emerald-300/10 bg-emerald-950/20 p-4 text-sm leading-6 text-zinc-200">
                         <p>Merhaba <span className="rounded-md bg-amber-300/15 px-1.5 py-0.5 font-mono font-bold text-amber-100" title="Müşteri adı değişkeni">{"{{1}}"}</span> 🌸</p>
                         <p>Uzun bir aranın ardından Mabel Hair Art olarak yeniden hizmet vermeye başlıyorum.</p>
-                        <p>18 Ağustos 2026 tarihinden itibaren <strong className="font-black text-white">yeni adresimde</strong> sizlerle olacağım.</p>
+                        <p>{ANNOUNCEMENT_DATE_LABEL} tarihinden itibaren <strong className="font-black text-white">yeni adresimde</strong> sizlerle olacağım.</p>
                         <p>Randevu için: <strong className="font-black text-amber-100">mabelhairart.com.tr</strong></p>
                         <p>Sizi yeniden görmek dileğiyle.</p>
                         <p className="font-black text-white">Mabel Hair Art</p>
