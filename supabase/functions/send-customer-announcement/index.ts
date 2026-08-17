@@ -12,7 +12,7 @@ import {
   WhatsAppTemplateApproval,
 } from "../_shared/whatsapp.ts";
 
-const CAMPAIGN_ID = "mabel_reopening_2026_08_18_v2";
+const SERIES_ID = "mabel_reopening_2026_08_18_v2";
 const TEMPLATE_NAME = "mabel_calisma_bilgisi_v2";
 const ANNOUNCEMENT_DATE = "19 Ağustos 2026";
 const LEASE_SECONDS = 15 * 60;
@@ -47,12 +47,64 @@ type CampaignSummary = {
 };
 
 type CampaignRow = {
+  campaign_id: string;
+  round_number: number;
   state: string;
   locked_until: string | null;
+  recipient_count: number;
 };
+
+type PreparedRound = {
+  campaign_id: string;
+  round_number: number;
+  recipient_count: number;
+  created: boolean;
+};
+
+type RequestBody =
+  | { action: "status" }
+  | { action: "new-round"; requestId: string }
+  | { action: "send"; roundId: string };
 
 function firstRow<T>(value: T | T[] | null): T | null {
   return Array.isArray(value) ? value[0] || null : value;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isUuid(value: unknown): value is string {
+  return typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+      .test(value);
+}
+
+function isRoundId(value: unknown): value is string {
+  return typeof value === "string" &&
+    /^[a-z0-9_:-]{1,128}$/.test(value);
+}
+
+function parseRequestBody(value: unknown): RequestBody | null {
+  if (!isRecord(value) || typeof value.action !== "string") return null;
+
+  const keys = Object.keys(value).sort().join(",");
+  if (value.action === "status" && keys === "action") {
+    return { action: "status" };
+  }
+  if (
+    value.action === "new-round" && keys === "action,requestId" &&
+    isUuid(value.requestId)
+  ) {
+    return { action: "new-round", requestId: value.requestId };
+  }
+  if (
+    value.action === "send" && keys === "action,roundId" &&
+    isRoundId(value.roundId)
+  ) {
+    return { action: "send", roundId: value.roundId };
+  }
+  return null;
 }
 
 function safeDiagnostic(error: unknown) {
@@ -83,7 +135,10 @@ function safeName(value: unknown) {
   return (name || "Müşterimiz").slice(0, 80);
 }
 
-async function loadRecipients(supabase: SupabaseAdmin): Promise<RecipientData> {
+async function loadRecipients(
+  supabase: SupabaseAdmin,
+  roundId: string,
+): Promise<RecipientData> {
   const recipients = new Map<string, Recipient>();
   let invalidRecipientCount = 0;
 
@@ -92,7 +147,7 @@ async function loadRecipients(supabase: SupabaseAdmin): Promise<RecipientData> {
     const { data, error } = await supabase
       .from("broadcast_recipients")
       .select("phone, customer_name")
-      .eq("campaign_id", CAMPAIGN_ID)
+      .eq("campaign_id", roundId)
       .order("phone", { ascending: true })
       .range(from, from + PAGE_SIZE - 1);
     if (error) throw error;
@@ -119,14 +174,14 @@ async function loadRecipients(supabase: SupabaseAdmin): Promise<RecipientData> {
   throw new Error("Broadcast recipient snapshot exceeded the safety limit");
 }
 
-async function loadCampaignLogs(supabase: SupabaseAdmin) {
+async function loadCampaignLogs(supabase: SupabaseAdmin, roundId: string) {
   const logs: CampaignLog[] = [];
   for (let page = 0; page < MAX_PAGES; page += 1) {
     const from = page * PAGE_SIZE;
     const { data, error } = await supabase
       .from("message_logs")
       .select("phone, status")
-      .eq("campaign_id", CAMPAIGN_ID)
+      .eq("campaign_id", roundId)
       .order("id", { ascending: true })
       .range(from, from + PAGE_SIZE - 1);
     if (error) throw error;
@@ -137,11 +192,28 @@ async function loadCampaignLogs(supabase: SupabaseAdmin) {
   throw new Error("Campaign log scan exceeded the safety limit");
 }
 
-async function loadCampaign(supabase: SupabaseAdmin) {
+async function loadCampaign(supabase: SupabaseAdmin, roundId: string) {
   const { data, error } = await supabase
     .from("broadcast_campaigns")
-    .select("state, locked_until")
-    .eq("campaign_id", CAMPAIGN_ID)
+    .select(
+      "campaign_id, round_number, state, locked_until, recipient_count",
+    )
+    .eq("campaign_id", roundId)
+    .eq("series_id", SERIES_ID)
+    .maybeSingle();
+  if (error) throw error;
+  return data as CampaignRow | null;
+}
+
+async function loadLatestRound(supabase: SupabaseAdmin) {
+  const { data, error } = await supabase
+    .from("broadcast_campaigns")
+    .select(
+      "campaign_id, round_number, state, locked_until, recipient_count",
+    )
+    .eq("series_id", SERIES_ID)
+    .order("round_number", { ascending: false })
+    .limit(1)
     .maybeSingle();
   if (error) throw error;
   return data as CampaignRow | null;
@@ -149,9 +221,10 @@ async function loadCampaign(supabase: SupabaseAdmin) {
 
 async function campaignSummary(
   supabase: SupabaseAdmin,
+  roundId: string,
   recipients: Recipient[],
 ) {
-  const logs = await loadCampaignLogs(supabase);
+  const logs = await loadCampaignLogs(supabase, roundId);
   const recipientPhones = new Set(
     recipients.map((recipient) => recipient.phone),
   );
@@ -187,6 +260,16 @@ function campaignLocked(campaign: CampaignRow | null) {
     new Date(String(campaign.locked_until)).getTime() > Date.now();
 }
 
+function campaignTerminal(campaign: CampaignRow | null) {
+  return campaign !== null &&
+    ["completed", "partial", "failed"].includes(campaign.state);
+}
+
+function campaignSendable(campaign: CampaignRow | null) {
+  return campaign !== null &&
+    ["idle", "running", "partial", "failed"].includes(campaign.state);
+}
+
 function statusPayload(
   summary: CampaignSummary,
   recipientData: RecipientData,
@@ -195,9 +278,14 @@ function statusPayload(
 ) {
   const templateStatus = approval?.status || "UNAVAILABLE";
   const locked = campaignLocked(campaign);
+  const roundId = campaign?.campaign_id || "";
+  const completed = campaign?.state === "completed";
   return {
-    campaign: CAMPAIGN_ID,
-    campaignId: CAMPAIGN_ID,
+    campaign: roundId,
+    campaignId: roundId,
+    seriesId: SERIES_ID,
+    roundId,
+    roundNumber: campaign?.round_number || 0,
     template: TEMPLATE_NAME,
     templateName: TEMPLATE_NAME,
     templateStatus,
@@ -212,8 +300,36 @@ function statusPayload(
     processing: summary.processing,
     campaignState: campaign?.state || "idle",
     locked,
-    canSend: templateStatus === "APPROVED" && summary.pending > 0 && !locked,
+    canSend: templateStatus === "APPROVED" && summary.pending > 0 && !locked &&
+      !completed && campaignSendable(campaign),
+    canStartNewRound: templateStatus === "APPROVED" &&
+      summary.recipientCount > 0 && summary.pending === 0 &&
+      summary.processing === 0 && !locked && campaignTerminal(campaign),
   };
+}
+
+async function prepareRound(
+  supabase: SupabaseAdmin,
+  requestId: string,
+) {
+  const { data, error } = await supabase.rpc("prepare_broadcast_round", {
+    p_series_id: SERIES_ID,
+    p_request_id: requestId,
+    p_template_name: TEMPLATE_NAME,
+    p_template_parameters: ["customer_name", ANNOUNCEMENT_DATE],
+  });
+  if (error) throw error;
+
+  const prepared = firstRow(data) as PreparedRound | null;
+  if (
+    !prepared || !isRoundId(prepared.campaign_id) ||
+    !Number.isInteger(prepared.round_number) || prepared.round_number < 1 ||
+    !Number.isInteger(prepared.recipient_count) ||
+    prepared.recipient_count < 1 || typeof prepared.created !== "boolean"
+  ) {
+    throw new Error("Invalid prepared broadcast round response");
+  }
+  return prepared;
 }
 
 async function finalizeMessage(
@@ -235,6 +351,7 @@ async function finalizeMessage(
 
 async function processRecipient(
   supabase: SupabaseAdmin,
+  roundId: string,
   runToken: string,
   recipient: Recipient,
 ) {
@@ -243,7 +360,7 @@ async function processRecipient(
     | null = null;
   try {
     const { data, error } = await supabase.rpc("reserve_broadcast_message", {
-      p_campaign_id: CAMPAIGN_ID,
+      p_campaign_id: roundId,
       p_run_token: runToken,
       p_phone: recipient.phone,
       p_template_name: TEMPLATE_NAME,
@@ -303,13 +420,14 @@ async function processRecipient(
 
 async function completeCampaign(
   supabase: SupabaseAdmin,
+  roundId: string,
   runToken: string,
   summary: CampaignSummary,
   skipped: number,
   lastError: string | null,
 ) {
   const { data, error } = await supabase.rpc("complete_broadcast_campaign", {
-    p_campaign_id: CAMPAIGN_ID,
+    p_campaign_id: roundId,
     p_run_token: runToken,
     p_sent_count: summary.sent,
     p_failed_count: summary.failed,
@@ -320,6 +438,19 @@ async function completeCampaign(
   });
   if (error) throw error;
   return data === true;
+}
+
+async function loadRoundContext(
+  supabase: SupabaseAdmin,
+  roundId: string,
+) {
+  const recipientData = await loadRecipients(supabase, roundId);
+  const [summary, campaign] = await Promise.all([
+    campaignSummary(supabase, roundId, recipientData.recipients),
+    loadCampaign(supabase, roundId),
+  ]);
+  if (!campaign) throw new Error("Broadcast round not found");
+  return { recipientData, summary, campaign };
 }
 
 Deno.serve(async (req) => {
@@ -359,24 +490,21 @@ Deno.serve(async (req) => {
     return adminJson(req, { ok: false, error: "Geçersiz istek." }, 400);
   }
 
-  let body: Record<string, unknown>;
+  let parsedBody: unknown;
   try {
     const rawBody = await req.text();
     if (rawBody.length > MAX_BODY_LENGTH) throw new Error("body too large");
-    body = JSON.parse(rawBody);
+    parsedBody = JSON.parse(rawBody);
   } catch {
     return adminJson(req, { ok: false, error: "Geçersiz istek." }, 400);
   }
 
-  if (
-    !body || Array.isArray(body) ||
-    Object.keys(body).sort().join(",") !== "action" ||
-    !["status", "send"].includes(String(body.action || ""))
-  ) {
+  const body = parseRequestBody(parsedBody);
+  if (!body) {
     return adminJson(req, { ok: false, error: "Geçersiz istek." }, 400);
   }
 
-  const action = String(body.action) as "status" | "send";
+  const action = body.action;
   const supabase = getSupabaseAdmin();
   if (!supabase) {
     return adminJson(req, {
@@ -385,14 +513,20 @@ Deno.serve(async (req) => {
     }, 503);
   }
 
-  let diagnosticStage = "load_recipients";
+  let diagnosticStage = "load_latest_round";
   try {
-    const recipientData = await loadRecipients(supabase);
-    diagnosticStage = "load_campaign_state";
-    const [summary, campaign] = await Promise.all([
-      campaignSummary(supabase, recipientData.recipients),
-      loadCampaign(supabase),
-    ]);
+    const latestRound = await loadLatestRound(supabase);
+    let currentContext: Awaited<ReturnType<typeof loadRoundContext>> | null =
+      null;
+    if (latestRound) {
+      diagnosticStage = "load_round_state";
+      currentContext = await loadRoundContext(
+        supabase,
+        latestRound.campaign_id,
+      );
+    } else if (action !== "new-round") {
+      throw new Error("Broadcast round not configured");
+    }
 
     diagnosticStage = "template_approval";
     let approval: WhatsAppTemplateApproval;
@@ -403,29 +537,153 @@ Deno.serve(async (req) => {
         "announcement template status failed",
         error instanceof Error ? error.message : "unknown error",
       );
+      const unavailableStatus = currentContext
+        ? statusPayload(
+          currentContext.summary,
+          currentContext.recipientData,
+          null,
+          currentContext.campaign,
+        )
+        : {
+          campaign: "",
+          campaignId: "",
+          seriesId: SERIES_ID,
+          roundId: "",
+          roundNumber: 0,
+          template: TEMPLATE_NAME,
+          templateName: TEMPLATE_NAME,
+          templateStatus: "UNAVAILABLE",
+        };
       return adminJson(req, {
         ok: false,
-        ...statusPayload(summary, recipientData, null, campaign),
+        ...unavailableStatus,
         message: "WhatsApp şablon durumu doğrulanamadı. Gönderim yapılmadı.",
       }, 502);
     }
 
+    if (body.action === "new-round") {
+      const currentStatus = currentContext
+        ? statusPayload(
+          currentContext.summary,
+          currentContext.recipientData,
+          approval,
+          currentContext.campaign,
+        )
+        : null;
+
+      if (approval.status !== "APPROVED") {
+        return adminJson(req, {
+          ok: false,
+          ...(currentStatus || {
+            seriesId: SERIES_ID,
+            roundId: "",
+            roundNumber: 0,
+            template: TEMPLATE_NAME,
+            templateName: TEMPLATE_NAME,
+            templateStatus: approval.status,
+          }),
+          message:
+            "WhatsApp şablonu APPROVED durumunda değil. Yeni gönderim turu hazırlanmadı.",
+        }, 409);
+      }
+
+      if (
+        currentContext &&
+        ((currentContext.campaign.state !== "idle" &&
+          !currentStatus?.canStartNewRound) ||
+          (currentContext.campaign.state === "idle" &&
+            currentContext.summary.processing > 0))
+      ) {
+        return adminJson(req, {
+          ok: false,
+          ...currentStatus,
+          message: "Mevcut gönderim turu tamamlanmadan yeni tur başlatılamaz.",
+        }, 409);
+      }
+
+      diagnosticStage = "prepare_round";
+      const prepared = await prepareRound(supabase, body.requestId);
+      diagnosticStage = "load_prepared_round";
+      const preparedLatest = await loadLatestRound(supabase);
+      if (
+        !preparedLatest ||
+        preparedLatest.campaign_id !== prepared.campaign_id ||
+        preparedLatest.round_number !== prepared.round_number
+      ) {
+        throw new Error("Prepared broadcast round is not current");
+      }
+
+      const preparedContext = await loadRoundContext(
+        supabase,
+        prepared.campaign_id,
+      );
+      const preparedStatus = statusPayload(
+        preparedContext.summary,
+        preparedContext.recipientData,
+        approval,
+        preparedContext.campaign,
+      );
+      if (
+        preparedContext.campaign.recipient_count !== prepared.recipient_count ||
+        preparedContext.summary.recipientCount !== prepared.recipient_count
+      ) {
+        throw new Error("Prepared broadcast recipient count mismatch");
+      }
+      if (preparedContext.campaign.state !== "idle") {
+        return adminJson(req, {
+          ok: false,
+          ...preparedStatus,
+          created: prepared.created,
+          message:
+            "Hazırlanan gönderim turu başka bir işlem tarafından başlatılmış. Durumu yenileyin.",
+        }, 409);
+      }
+
+      return adminJson(req, {
+        ok: true,
+        ...preparedStatus,
+        created: prepared.created,
+        message: prepared.created
+          ? "Yeni gönderim turu hazırlandı. Mesaj gönderilmedi."
+          : "Hazır bekleyen gönderim turu döndürüldü. Mesaj gönderilmedi.",
+      });
+    }
+
+    if (!currentContext) throw new Error("Broadcast round not configured");
+    const { recipientData, summary, campaign } = currentContext;
     const currentStatus = statusPayload(
       summary,
       recipientData,
       approval,
       campaign,
     );
-    if (action === "status") {
+    if (body.action === "status") {
       return adminJson(req, { ok: true, ...currentStatus });
     }
 
+    const roundId = body.roundId;
+    if (roundId !== campaign.campaign_id) {
+      return adminJson(req, {
+        ok: false,
+        ...currentStatus,
+        message:
+          "İstenen gönderim turu güncel değil. Durumu yenileyip tekrar onaylayın.",
+      }, 409);
+    }
     if (approval.status !== "APPROVED") {
       return adminJson(req, {
         ok: false,
         ...currentStatus,
         message:
           "WhatsApp şablonu APPROVED durumunda değil. Gönderim yapılmadı.",
+      }, 409);
+    }
+    if (campaign.state === "completed") {
+      return adminJson(req, {
+        ok: false,
+        ...currentStatus,
+        message:
+          "Tamamlanan gönderim turu yeniden başlatılamaz. Tekrar göndermek için yeni tur hazırlayın.",
       }, 409);
     }
     if (summary.recipientCount === 0) {
@@ -444,12 +702,40 @@ Deno.serve(async (req) => {
           : "Bu kampanya için tüm müşteriler daha önce işlendi.",
       });
     }
+    if (currentStatus.locked) {
+      return adminJson(req, {
+        ok: false,
+        ...currentStatus,
+        message: "Bu gönderim turu için başka bir işlem halen devam ediyor.",
+      }, 409);
+    }
+    if (!currentStatus.canSend) {
+      return adminJson(req, {
+        ok: false,
+        ...currentStatus,
+        message: "Bu gönderim turu şu anda gönderime uygun değil.",
+      }, 409);
+    }
+
+    diagnosticStage = "verify_latest_round";
+    const verifiedLatest = await loadLatestRound(supabase);
+    if (
+      !verifiedLatest || verifiedLatest.campaign_id !== roundId ||
+      verifiedLatest.round_number !== campaign.round_number
+    ) {
+      return adminJson(req, {
+        ok: false,
+        ...currentStatus,
+        message:
+          "Gönderim turu bu sırada değişti. Durumu yenileyip yeni turu tekrar onaylayın.",
+      }, 409);
+    }
 
     diagnosticStage = "claim_campaign";
     const { data: claimData, error: claimError } = await supabase.rpc(
       "claim_broadcast_campaign",
       {
-        p_campaign_id: CAMPAIGN_ID,
+        p_campaign_id: roundId,
         p_template_name: TEMPLATE_NAME,
         p_template_parameters: ["customer_name", ANNOUNCEMENT_DATE],
         p_recipient_count: recipientData.recipients.length,
@@ -467,9 +753,10 @@ Deno.serve(async (req) => {
     if (!claim?.acquired || !claim.run_token) {
       const latestSummary = await campaignSummary(
         supabase,
+        roundId,
         recipientData.recipients,
       );
-      const latestCampaign = await loadCampaign(supabase);
+      const latestCampaign = await loadCampaign(supabase, roundId);
       return adminJson(req, {
         ok: false,
         ...statusPayload(
@@ -500,7 +787,7 @@ Deno.serve(async (req) => {
         const { data: renewed, error: renewError } = await supabase.rpc(
           "renew_broadcast_campaign",
           {
-            p_campaign_id: CAMPAIGN_ID,
+            p_campaign_id: roundId,
             p_run_token: runToken,
             p_lease_seconds: LEASE_SECONDS,
           },
@@ -512,7 +799,7 @@ Deno.serve(async (req) => {
         const batch = recipientData.recipients.slice(index, index + batchSize);
         const results = await Promise.all(
           batch.map((recipient) =>
-            processRecipient(supabase, runToken, recipient)
+            processRecipient(supabase, roundId, runToken, recipient)
           ),
         );
         skipped += results.filter((result) => result === "skipped").length;
@@ -520,17 +807,30 @@ Deno.serve(async (req) => {
 
       const finalSummary = await campaignSummary(
         supabase,
+        roundId,
         recipientData.recipients,
       );
       if (
-        !await completeCampaign(supabase, runToken, finalSummary, skipped, null)
+        !await completeCampaign(
+          supabase,
+          roundId,
+          runToken,
+          finalSummary,
+          skipped,
+          null,
+        )
       ) {
         throw new Error("Campaign completion rejected");
       }
-      const finalCampaign = await loadCampaign(supabase);
+      const finalCampaign = await loadCampaign(supabase, roundId);
       return adminJson(req, {
         ok: true,
-        ...statusPayload(finalSummary, recipientData, approval, finalCampaign),
+        ...statusPayload(
+          finalSummary,
+          recipientData,
+          approval,
+          finalCampaign || campaign,
+        ),
         skipped,
         message: finalSummary.processing > 0
           ? "Duyuru gönderimi durdu; sonucu belirsiz alıcılara güvenlik için yeniden gönderim yapılmaz."
@@ -546,23 +846,27 @@ Deno.serve(async (req) => {
       });
       const failedSummary = await campaignSummary(
         supabase,
+        roundId,
         recipientData.recipients,
       ).catch(() => summary);
       await completeCampaign(
         supabase,
+        roundId,
         runToken,
         failedSummary,
         skipped,
         "Broadcast processing failed",
       ).catch(() => false);
-      const failedCampaign = await loadCampaign(supabase).catch(() => campaign);
+      const failedCampaign = await loadCampaign(supabase, roundId).catch(() =>
+        campaign
+      );
       return adminJson(req, {
         ok: false,
         ...statusPayload(
           failedSummary,
           recipientData,
           approval,
-          failedCampaign,
+          failedCampaign || campaign,
         ),
         skipped,
         message:

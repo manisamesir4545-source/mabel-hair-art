@@ -12,8 +12,19 @@ const REMOTE_ERROR_LOG_INTERVAL = 60_000;
 const REMOTE_OK_POLL_INTERVAL = 5_000;
 const REMOTE_DOWN_POLL_INTERVAL = 30_000;
 const remoteErrorLogTimes = {};
+const ANNOUNCEMENT_ROUND_STATE_LABELS = Object.freeze({
+  idle: "Hazır",
+  running: "Gönderiliyor",
+  completed: "Tamamlandı",
+  partial: "Kısmi tamamlandı",
+  failed: "Başarısız",
+});
 const EMPTY_ANNOUNCEMENT_STATUS = Object.freeze({
   campaign: "",
+  seriesId: "",
+  roundId: "",
+  roundNumber: 0,
+  campaignState: "idle",
   template: "",
   templateStatus: "UNKNOWN",
   recipientCount: 0,
@@ -23,6 +34,7 @@ const EMPTY_ANNOUNCEMENT_STATUS = Object.freeze({
   processing: 0,
   locked: false,
   canSend: false,
+  canStartNewRound: false,
 });
 
 function countValue(value, fallback = 0) {
@@ -40,9 +52,16 @@ function normalizeAnnouncementStatus(payload, previous = EMPTY_ANNOUNCEMENT_STAT
   const pending = countValue(source.pending ?? source.remaining, Math.max(0, recipientCount - sent - failed - processing));
   const locked = typeof source.locked === "boolean" ? source.locked : previous.locked;
   const canSend = typeof source.canSend === "boolean" ? source.canSend : previous.canSend;
+  const canStartNewRound = typeof source.canStartNewRound === "boolean"
+    ? source.canStartNewRound
+    : previous.canStartNewRound;
 
   return {
     campaign: source.campaign || previous.campaign || "",
+    seriesId: source.seriesId || previous.seriesId || "",
+    roundId: source.roundId || source.campaignId || source.campaign || previous.roundId || "",
+    roundNumber: countValue(source.roundNumber, previous.roundNumber),
+    campaignState: String(source.campaignState || previous.campaignState || "idle"),
     template: source.template || previous.template || "",
     templateStatus: String(source.templateStatus || previous.templateStatus || "UNKNOWN").toUpperCase(),
     recipientCount,
@@ -52,6 +71,7 @@ function normalizeAnnouncementStatus(payload, previous = EMPTY_ANNOUNCEMENT_STAT
     processing,
     locked,
     canSend,
+    canStartNewRound,
   };
 }
 
@@ -1722,13 +1742,14 @@ export default function MabelHairArt() {
         : announcementSummary.templateStatus === "REJECTED"
           ? "Meta tarafından reddedildi"
           : "Meta durumu alınamadı";
+  const announcementRoundStateLabel = ANNOUNCEMENT_ROUND_STATE_LABELS[announcementSummary.campaignState] || "Durum bekleniyor";
   const announcementActionDisabled = !announcementTemplateApproved
     || announcementLoading
     || announcementSending
     || !announcementStatus
-    || !announcementSummary.canSend
     || announcementSummary.locked
-    || announcementSummary.pending <= 0;
+    || announcementSummary.processing > 0
+    || (!announcementSummary.canSend && !announcementSummary.canStartNewRound);
 
   const customerAppointments = selectedCustomerPhone ? data.appointments.filter((a) => a.phone === selectedCustomerPhone) : [];
   const selectedCustomer = selectedCustomerPhone ? customers.find((c) => c.phone === selectedCustomerPhone) : null;
@@ -1925,33 +1946,54 @@ export default function MabelHairArt() {
     announcementPollGenerationRef.current = generation;
     setAnnouncementSending(true);
     setAnnouncementError("");
-
-    let progressTimer = window.setTimeout(async function pollAnnouncementProgress() {
-      try {
-        const payload = await invokeAdminEdgeFunction("send-customer-announcement", {
-          token: adminSessionToken,
-          body: { action: "status" },
-        });
-        if (announcementPollGenerationRef.current !== generation) return;
-        setAnnouncementStatus((current) => normalizeAnnouncementStatus(payload, current || EMPTY_ANNOUNCEMENT_STATUS));
-      } catch {
-        // The main send request owns final error and session feedback.
-      } finally {
-        if (announcementPollGenerationRef.current === generation) {
-          progressTimer = window.setTimeout(pollAnnouncementProgress, 1_200);
-        }
-      }
-    }, 1_200);
+    let progressTimer = null;
 
     try {
+      let activeStatus = announcementStatus || EMPTY_ANNOUNCEMENT_STATUS;
+      if (activeStatus.canStartNewRound) {
+        if (!globalThis.crypto?.randomUUID) {
+          throw new Error("Tarayıcınız güvenli gönderim kimliği oluşturamıyor. Sayfayı güncelleyip tekrar deneyin.");
+        }
+        const preparedPayload = await invokeAdminEdgeFunction("send-customer-announcement", {
+          token: adminSessionToken,
+          body: { action: "new-round", requestId: globalThis.crypto.randomUUID() },
+        });
+        if (announcementPollGenerationRef.current !== generation) return;
+        activeStatus = normalizeAnnouncementStatus(preparedPayload, activeStatus);
+        setAnnouncementStatus(activeStatus);
+      }
+
+      if (!activeStatus.canSend || !activeStatus.roundId) {
+        throw new Error("Yeni gönderim turu hazırlanamadı. Durumu yenileyip tekrar deneyin.");
+      }
+
+      progressTimer = window.setTimeout(async function pollAnnouncementProgress() {
+        try {
+          const statusPayload = await invokeAdminEdgeFunction("send-customer-announcement", {
+            token: adminSessionToken,
+            body: { action: "status" },
+          });
+          if (announcementPollGenerationRef.current !== generation) return;
+          setAnnouncementStatus((current) => normalizeAnnouncementStatus(statusPayload, current || EMPTY_ANNOUNCEMENT_STATUS));
+        } catch {
+          // The main send request owns final error and session feedback.
+        } finally {
+          if (announcementPollGenerationRef.current === generation) {
+            progressTimer = window.setTimeout(pollAnnouncementProgress, 1_200);
+          }
+        }
+      }, 1_200);
+
       const payload = await invokeAdminEdgeFunction("send-customer-announcement", {
         token: adminSessionToken,
-        body: { action: "send" },
+        body: { action: "send", roundId: activeStatus.roundId },
       });
       if (announcementPollGenerationRef.current !== generation) return;
-      const nextStatus = normalizeAnnouncementStatus(payload, announcementStatus || EMPTY_ANNOUNCEMENT_STATUS);
+      const nextStatus = normalizeAnnouncementStatus(payload, activeStatus);
       setAnnouncementStatus(nextStatus);
-      const resultTitle = nextStatus.failed > 0 || nextStatus.processing > 0 ? "Duyuru gönderimi kısmi tamamlandı." : "Duyuru gönderimi tamamlandı.";
+      const resultTitle = nextStatus.failed > 0 || nextStatus.processing > 0
+        ? `Tur ${nextStatus.roundNumber} kısmi tamamlandı.`
+        : `Tur ${nextStatus.roundNumber} tamamlandı.`;
       alert([
         resultTitle,
         `Gönderilen: ${nextStatus.sent}`,
@@ -1970,7 +2012,7 @@ export default function MabelHairArt() {
       }
     } finally {
       announcementPollGenerationRef.current += 1;
-      window.clearTimeout(progressTimer);
+      if (progressTimer !== null) window.clearTimeout(progressTimer);
       announcementSendLockRef.current = false;
       setAnnouncementSending(false);
     }
@@ -1982,11 +2024,26 @@ export default function MabelHairArt() {
       return;
     }
     if (announcementSummary.locked) {
-      alert("Bu kampanya için başka bir gönderim devam ediyor. Durumu yenileyip tekrar kontrol edin.");
+      alert("Bu gönderim turu için başka bir işlem devam ediyor. Durumu yenileyip tekrar kontrol edin.");
+      return;
+    }
+    if (announcementSummary.processing > 0) {
+      alert(`${announcementSummary.processing} alıcının sonucu belirsiz. Yanlışlıkla ikinci mesaj gitmemesi için yeni tur başlatılamaz.`, "warning");
+      return;
+    }
+    if (announcementSummary.canStartNewRound) {
+      const nextRound = Math.max(2, announcementSummary.roundNumber + 1);
+      askConfirm({
+        title: `Duyuru Tur ${nextRound} ile tekrar gönderilsin mi?`,
+        message: `Tur ${announcementSummary.roundNumber} tamamlandı. Yeni Tur ${nextRound} oluşturulacak ve güncel izin kontrollerinden geçen en fazla ${announcementSummary.recipientCount} müşteriye ${ANNOUNCEMENT_DATE_LABEL} tarihli yeni adres duyurusu tekrar gönderilecek. Önceki turda mesaj alan müşteriler ikinci mesajı alabilir. Bu işlem geri alınamaz.`,
+        confirmText: "Duyuruyu tekrar gönder",
+        tone: "danger",
+        onConfirm: sendCustomerAnnouncement,
+      });
       return;
     }
     if (announcementSummary.pending <= 0) {
-      alert(announcementSummary.failed > 0 || announcementSummary.processing > 0 ? "Bu kampanya kısmi tamamlandı; başarısız veya sonucu belirsiz kayıtlar güvenlik nedeniyle yeniden gönderilmeyecek." : "Bu kampanyadaki tüm müşterilere duyuru gönderildi.", announcementSummary.failed > 0 || announcementSummary.processing > 0 ? "warning" : "success");
+      alert(announcementSummary.failed > 0 ? "Bu tur kısmi tamamlandı; başarısız kayıtlar aynı tur içinde güvenlik nedeniyle yeniden gönderilmeyecek." : "Bu turdaki tüm müşterilere duyuru gönderildi.", announcementSummary.failed > 0 ? "warning" : "success");
       return;
     }
     if (!announcementSummary.canSend) {
@@ -1994,10 +2051,12 @@ export default function MabelHairArt() {
       return;
     }
 
+    const isRepeatRound = announcementSummary.roundNumber > 1;
     askConfirm({
-      title: "WhatsApp duyurusu gönderilsin mi?",
-      message: `${announcementSummary.pending} müşteriye ${ANNOUNCEMENT_DATE_LABEL} tarihli yeni adres duyurusu gönderilecek. Gönderim başladıktan sonra bu kampanya kapsamında aynı müşteriye ikinci kez mesaj gönderilmez. Yalnızca WhatsApp üzerinden iletişim izni bulunan müşterilere gönderdiğinizi onaylıyorsunuz.`,
-      confirmText: `${announcementSummary.pending} müşteriye gönder`,
+      title: isRepeatRound ? `Duyuru Tur ${announcementSummary.roundNumber} gönderilsin mi?` : "WhatsApp duyurusu gönderilsin mi?",
+      message: `${announcementSummary.pending} müşteriye ${ANNOUNCEMENT_DATE_LABEL} tarihli yeni adres duyurusu ${isRepeatRound ? "tekrar " : ""}gönderilecek. Aynı tur içinde müşteriye ikinci kez mesaj gönderilmez. Yalnızca WhatsApp üzerinden iletişim izni bulunan müşterilere gönderdiğinizi onaylıyorsunuz.`,
+      confirmText: `${announcementSummary.pending} müşteriye ${isRepeatRound ? "tekrar " : ""}gönder`,
+      tone: isRepeatRound ? "danger" : undefined,
       onConfirm: sendCustomerAnnouncement,
     });
   }
@@ -3402,7 +3461,7 @@ export default function MabelHairArt() {
                       <div className="min-w-0">
                         <p className="text-xs font-black uppercase tracking-[0.16em] text-amber-200">WhatsApp toplu duyuru</p>
                         <h3 id="customer-announcement-title" className="mt-1 text-xl font-black text-white">Yeni adres duyurusu</h3>
-                        <p className="mt-1 text-sm leading-6 text-zinc-400">Onaylı Meta şablonunu kayıtlı müşterilere güvenli ve tekil kampanya olarak gönderin.</p>
+                        <p className="mt-1 text-sm leading-6 text-zinc-400">Onaylı Meta şablonunu kayıtlı müşterilere güvenli ve ayrı gönderim turlarıyla gönderin.</p>
                       </div>
                     </div>
                     <div className="flex items-center gap-2 self-start sm:self-center">
@@ -3449,7 +3508,7 @@ export default function MabelHairArt() {
                       <div className="flex items-center justify-between gap-3">
                         <div>
                           <p className="text-sm font-black text-zinc-200">Gönderim durumu</p>
-                          <p className="mt-1 text-xs text-zinc-500">{announcementSummary.campaign ? `Kampanya: ${announcementSummary.campaign}` : "Kampanya bilgisi sunucudan bekleniyor"}</p>
+                          <p className="mt-1 text-xs text-zinc-500">{announcementSummary.roundNumber > 0 ? `Tur ${announcementSummary.roundNumber} · ${announcementRoundStateLabel}` : "Gönderim turu sunucudan bekleniyor"}</p>
                         </div>
                         {(announcementSending || announcementSummary.locked) && <span className="inline-flex items-center gap-2 text-xs font-bold text-amber-200"><Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />{announcementSending ? "İşleniyor" : "Kampanya kilitli"}</span>}
                       </div>
@@ -3498,11 +3557,13 @@ export default function MabelHairArt() {
                         aria-describedby="announcement-action-help"
                         className="mt-4 inline-flex min-h-12 w-full items-center justify-center gap-2 rounded-2xl bg-amber-300 px-4 py-3 font-black text-black transition hover:bg-amber-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-300 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400 disabled:opacity-70"
                       >
-                        {announcementSending || announcementSummary.locked ? <Loader2 className="h-5 w-5 animate-spin motion-reduce:animate-none" aria-hidden="true" /> : announcementSummary.pending <= 0 && announcementStatus ? <CircleCheck className="h-5 w-5" aria-hidden="true" /> : <Send className="h-5 w-5" aria-hidden="true" />}
+                        {announcementSending || announcementSummary.locked ? <Loader2 className="h-5 w-5 animate-spin motion-reduce:animate-none" aria-hidden="true" /> : announcementSummary.canStartNewRound ? <Send className="h-5 w-5" aria-hidden="true" /> : announcementSummary.pending <= 0 && announcementStatus ? <CircleCheck className="h-5 w-5" aria-hidden="true" /> : <Send className="h-5 w-5" aria-hidden="true" />}
                         {announcementSending
                           ? `Gönderiliyor · ${announcementSummary.sent}/${announcementSummary.recipientCount}`
                           : announcementSummary.locked
                             ? "Gönderim devam ediyor"
+                            : announcementSummary.canStartNewRound
+                              ? "Duyuruyu tekrar gönder"
                             : announcementSummary.pending <= 0 && announcementStatus
                               ? announcementSummary.failed > 0 || announcementSummary.processing > 0 ? "Kısmi tamamlandı" : "Gönderim tamamlandı"
                               : !announcementSummary.canSend && announcementStatus
@@ -3516,6 +3577,8 @@ export default function MabelHairArt() {
                             ? "Başka bir güvenli gönderim çalışıyor; kampanya kilidi açılana kadar durum kontrol ediliyor."
                             : announcementSummary.processing > 0
                               ? `${announcementSummary.processing} alıcının sonucu belirsiz; yeniden gönderilmez, durum kontrol ediliyor.${announcementSummary.pending > 0 ? ` Kalan ${announcementSummary.pending} alıcı yeni gönderime uygundur.` : ""}`
+                              : announcementSummary.canStartNewRound
+                                ? `Tur ${announcementSummary.roundNumber} tamamlandı. Son onaydan sonra yeni tur oluşturulur ve uygun müşterilere duyuru tekrar gönderilir.`
                               : announcementSummary.pending <= 0 && announcementStatus
                                 ? announcementSummary.failed > 0 ? "Kampanya kısmi tamamlandı; başarısız kayıtlar yeniden gönderilmez." : "Bu kampanyadaki tüm alıcılar işlendi."
                                 : !announcementSummary.canSend && announcementStatus

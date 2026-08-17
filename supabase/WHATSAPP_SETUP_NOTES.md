@@ -55,13 +55,19 @@ Son deploy:
 
 ## Guvenli musteri duyurusu (19 Agustos 2026)
 
-Sabit kampanya ayarlari Edge Function icindedir; istemci telefon, alici, template veya
-kampanya kimligi gonderemez:
+Sabit seri ayarlari Edge Function icindedir; istemci telefon, alici, template veya
+kampanya kimligi uretemez:
 
 - Template: `mabel_calisma_bilgisi_v2`
 - Dil: `tr`
-- Campaign ID: `mabel_reopening_2026_08_18_v2`
+- Series ID: `mabel_reopening_2026_08_18_v2`
 - Body parametreleri: musteri adi ve `19 Ağustos 2026`
+
+Her gonderim ayri ve degistirilemez bir tur kimligi kullanir (`...:r2`, `...:r3`).
+Tamamlanan turun loglari silinmez veya sifirlanmaz. Yeni tur, ilk dogrulanmis alici
+snapshot'ini kopyalar ve yalniz service-role erisimli `broadcast_suppressions`
+tablosundaki telefonlari haric tutar. Bu tablo, alici snapshot'i hazirlandiktan
+sonra degisse bile Meta gonderim rezervasyonu alinirken yeniden kontrol edilir.
 
 Meta WhatsApp Manager'da template'in ayni ad/dil ile `APPROVED` olmasi gerekir.
 Edge Function her `status` ve `send` isteginde WABA `message_templates` endpointinden
@@ -73,8 +79,11 @@ Token'in hem `whatsapp_business_management` (template sorgusu) hem de
 
 1. Ilk olarak `supabase/migrations/20260816090000_secure_customer_announcements.sql`
    migration'ini uygula (`supabase db push` veya Supabase SQL Editor).
-2. Asagidaki Edge Function secret'larini ekle.
-3. Sonra `admin-session` ve `send-customer-announcement` function'larini deploy et.
+2. Tekrar kullanilabilir turlar icin
+   `supabase/migrations/20260817183915_add_reusable_announcement_rounds.sql`
+   migration'ini uygula.
+3. Asagidaki Edge Function secret'larini ekle.
+4. Sonra `admin-session` ve `send-customer-announcement` function'larini deploy et.
 
 Migration; PIN brute-force rate limit tablosunu, lease tabanli kampanya kilidini ve
 mesaj gonderilmeden once alinan atomik kisi rezervasyonunu kurar. Ayrica telefon ve
@@ -112,6 +121,9 @@ oturum token'i yalniz `sessionStorage`/bellekte tutulmali ve cikista silinmelidi
 npx supabase functions deploy admin-session --no-verify-jwt --project-ref qtyehohkrnxudeeeuuyy
 npx supabase functions deploy send-customer-announcement --no-verify-jwt --project-ref qtyehohkrnxudeeeuuyy
 ```
+
+Turkce karakterleri korumak icin function kaynagi dosya sisteminden Supabase CLI ile
+deploy edilmelidir; PowerShell metin ciktisini kopyalayarak deploy paketi olusturmayin.
 
 Bu iki function icin `--no-verify-jwt` zorunludur: frontend `sb_publishable_`
 anahtari kullaniyor ve bu anahtar JWT degildir. Gateway JWT kontrolu kapali olsa da
