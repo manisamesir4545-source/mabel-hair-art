@@ -19,6 +19,12 @@ const ANNOUNCEMENT_ROUND_STATE_LABELS = Object.freeze({
   partial: "Kısmi tamamlandı",
   failed: "Başarısız",
 });
+const ANNOUNCEMENT_TEMPLATE_CATEGORY_LABELS = Object.freeze({
+  MARKETING: "Pazarlama",
+  UTILITY: "Bilgilendirme",
+  AUTHENTICATION: "Kimlik doğrulama",
+  UNKNOWN: "Bilinmiyor",
+});
 const EMPTY_ANNOUNCEMENT_STATUS = Object.freeze({
   campaign: "",
   seriesId: "",
@@ -27,8 +33,15 @@ const EMPTY_ANNOUNCEMENT_STATUS = Object.freeze({
   campaignState: "idle",
   template: "",
   templateStatus: "UNKNOWN",
+  templateCategory: "UNKNOWN",
   recipientCount: 0,
   sent: 0,
+  providerSent: 0,
+  delivered: 0,
+  read: 0,
+  deleted: 0,
+  deliveryFailed: 0,
+  deliveryUnknown: 0,
   failed: 0,
   pending: 0,
   processing: 0,
@@ -47,6 +60,12 @@ function normalizeAnnouncementStatus(payload, previous = EMPTY_ANNOUNCEMENT_STAT
   const source = nestedStatus ? { ...payload, ...nestedStatus } : (payload || {});
   const recipientCount = countValue(source.recipientCount ?? source.total, previous.recipientCount);
   const sent = countValue(source.sent, previous.sent);
+  const providerSent = countValue(source.providerSent, previous.providerSent);
+  const delivered = countValue(source.delivered, previous.delivered);
+  const read = countValue(source.read, previous.read);
+  const deleted = countValue(source.deleted, previous.deleted);
+  const deliveryFailed = countValue(source.deliveryFailed, previous.deliveryFailed);
+  const deliveryUnknown = countValue(source.deliveryUnknown, previous.deliveryUnknown);
   const failed = countValue(source.failed, previous.failed);
   const processing = countValue(source.processing, previous.processing);
   const pending = countValue(source.pending ?? source.remaining, Math.max(0, recipientCount - sent - failed - processing));
@@ -64,8 +83,15 @@ function normalizeAnnouncementStatus(payload, previous = EMPTY_ANNOUNCEMENT_STAT
     campaignState: String(source.campaignState || previous.campaignState || "idle"),
     template: source.template || previous.template || "",
     templateStatus: String(source.templateStatus || previous.templateStatus || "UNKNOWN").toUpperCase(),
+    templateCategory: String(source.templateCategory || previous.templateCategory || "UNKNOWN").toUpperCase(),
     recipientCount,
     sent,
+    providerSent,
+    delivered,
+    read,
+    deleted,
+    deliveryFailed,
+    deliveryUnknown,
     failed,
     pending,
     processing,
@@ -1996,7 +2022,7 @@ export default function MabelHairArt() {
         : `Tur ${nextStatus.roundNumber} tamamlandı.`;
       alert([
         resultTitle,
-        `Gönderilen: ${nextStatus.sent}`,
+        `Meta isteği kabul etti: ${nextStatus.sent}`,
         `Başarısız: ${nextStatus.failed}`,
         `İşleniyor/belirsiz: ${nextStatus.processing}`,
         `Kalan: ${nextStatus.pending}`,
@@ -2033,9 +2059,12 @@ export default function MabelHairArt() {
     }
     if (announcementSummary.canStartNewRound) {
       const nextRound = Math.max(2, announcementSummary.roundNumber + 1);
+      const marketingRepeatWarning = announcementSummary.templateCategory === "MARKETING"
+        ? " Meta bu şablonu Pazarlama olarak sınıflandırıyor; kısa aralıklı tekrarları API'de kabul etse bile müşteriye teslim etmeyebilir."
+        : "";
       askConfirm({
         title: `Duyuru Tur ${nextRound} ile tekrar gönderilsin mi?`,
-        message: `Tur ${announcementSummary.roundNumber} tamamlandı. Yeni Tur ${nextRound} oluşturulacak ve güncel izin kontrollerinden geçen en fazla ${announcementSummary.recipientCount} müşteriye ${ANNOUNCEMENT_DATE_LABEL} tarihli yeni adres duyurusu tekrar gönderilecek. Önceki turda mesaj alan müşteriler ikinci mesajı alabilir. Bu işlem geri alınamaz.`,
+        message: `Tur ${announcementSummary.roundNumber} tamamlandı. Yeni Tur ${nextRound} oluşturulacak ve güncel izin kontrollerinden geçen en fazla ${announcementSummary.recipientCount} müşteriye ${ANNOUNCEMENT_DATE_LABEL} tarihli yeni adres duyurusu tekrar gönderilecek. Önceki turda gönderim istekleri Meta tarafından kabul edilen müşteriler için ikinci istek de oluşturulabilir.${marketingRepeatWarning} Bu işlem geri alınamaz.`,
         confirmText: "Duyuruyu tekrar gönder",
         tone: "danger",
         onConfirm: sendCustomerAnnouncement,
@@ -2043,7 +2072,7 @@ export default function MabelHairArt() {
       return;
     }
     if (announcementSummary.pending <= 0) {
-      alert(announcementSummary.failed > 0 ? "Bu tur kısmi tamamlandı; başarısız kayıtlar aynı tur içinde güvenlik nedeniyle yeniden gönderilmeyecek." : "Bu turdaki tüm müşterilere duyuru gönderildi.", announcementSummary.failed > 0 ? "warning" : "success");
+      alert(announcementSummary.failed > 0 ? "Bu tur kısmi tamamlandı; başarısız kayıtlar aynı tur içinde güvenlik nedeniyle yeniden gönderilmeyecek." : `Bu turdaki ${announcementSummary.sent} müşteri için Meta isteği kabul etti. Bu sayı mesajın teslim edildiği anlamına gelmez.`, announcementSummary.failed > 0 ? "warning" : "success");
       return;
     }
     if (!announcementSummary.canSend) {
@@ -3507,16 +3536,45 @@ export default function MabelHairArt() {
                     <div className="min-w-0 rounded-2xl border border-white/10 bg-black/35 p-4 sm:p-5" aria-live="polite">
                       <div className="flex items-center justify-between gap-3">
                         <div>
-                          <p className="text-sm font-black text-zinc-200">Gönderim durumu</p>
+                          <p className="text-sm font-black text-zinc-200">Meta işlem durumu</p>
                           <p className="mt-1 text-xs text-zinc-500">{announcementSummary.roundNumber > 0 ? `Tur ${announcementSummary.roundNumber} · ${announcementRoundStateLabel}` : "Gönderim turu sunucudan bekleniyor"}</p>
                         </div>
                         {(announcementSending || announcementSummary.locked) && <span className="inline-flex items-center gap-2 text-xs font-bold text-amber-200"><Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />{announcementSending ? "İşleniyor" : "Kampanya kilitli"}</span>}
                       </div>
 
+                      <div role="note" className="mt-4 flex items-start gap-2 rounded-xl border border-amber-300/20 bg-amber-300/10 p-3 text-xs font-semibold leading-5 text-amber-100">
+                        <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+                        <span>
+                          <span className="font-mono text-amber-200">mabel_calisma_bilgisi_v2</span>{" "}
+                          Meta kategorisi: <strong>{ANNOUNCEMENT_TEMPLATE_CATEGORY_LABELS[announcementSummary.templateCategory] || "Bilinmiyor"}</strong>.
+                          {announcementSummary.templateCategory === "MARKETING" ? " Kısa aralıklarla yapılan tekrar gönderimlerini Meta bekletebilir veya teslim etmeyebilir." : ""}{" "}
+                          “Meta kabul etti” teslim edildi anlamına gelmez. Aşağıdaki teslimat durumları yalnız Meta’nın imzalı bildirimlerinden gelir.
+                        </span>
+                      </div>
+
+                      <div className="mt-4">
+                        <p className="text-xs font-black uppercase tracking-[0.14em] text-zinc-500">Gerçek teslimat durumu</p>
+                        <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-2">
+                          {[
+                            { label: "Meta gönderdi", value: announcementStatus ? announcementSummary.providerSent : "—", tone: "text-blue-300" },
+                            { label: "Teslim edildi", value: announcementStatus ? announcementSummary.delivered : "—", tone: "text-emerald-300" },
+                            { label: "Okundu", value: announcementStatus ? announcementSummary.read : "—", tone: "text-teal-200" },
+                            { label: "Teslim edilemedi", value: announcementStatus ? announcementSummary.deliveryFailed : "—", tone: "text-red-300" },
+                            { label: "Durum alınamadı", value: announcementStatus ? announcementSummary.deliveryUnknown : "—", tone: "text-amber-200" },
+                            { label: "Silindi", value: announcementStatus ? announcementSummary.deleted : "—", tone: "text-zinc-300" },
+                          ].map((item) => (
+                            <div key={item.label} className="rounded-xl border border-white/10 bg-black/30 p-3">
+                              <p className="text-[11px] font-bold text-zinc-500">{item.label}</p>
+                              <p className={`mt-1 text-xl font-black tabular-nums ${item.tone}`}>{item.value}</p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
                       <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-5 xl:grid-cols-2">
                         {[
                           { label: "Toplam", value: announcementStatus ? announcementSummary.recipientCount : "—", tone: "text-white" },
-                          { label: "Gönderilen", value: announcementStatus ? announcementSummary.sent : "—", tone: "text-emerald-300" },
+                          { label: "Meta kabul etti", value: announcementStatus ? announcementSummary.sent : "—", tone: "text-emerald-300" },
                           { label: "Kalan", value: announcementStatus ? announcementSummary.pending : "—", tone: "text-amber-200" },
                           { label: "İşleniyor/Belirsiz", value: announcementStatus ? announcementSummary.processing : "—", tone: "text-blue-300" },
                           { label: "Başarısız", value: announcementStatus ? announcementSummary.failed : "—", tone: "text-red-300" },
@@ -3530,13 +3588,13 @@ export default function MabelHairArt() {
 
                       <div className="mt-4">
                         <div className="mb-2 flex items-center justify-between gap-2 text-xs text-zinc-400">
-                          <span>{announcementSending ? "Gönderim ilerlemesi" : "İşlenen kayıt"}</span>
+                          <span>{announcementSending ? "Meta işlem ilerlemesi" : "İşlenen kayıt"}</span>
                           <span className="font-bold tabular-nums text-zinc-200">{announcementStatus ? `${announcementProcessed}/${announcementSummary.recipientCount}` : "—"}</span>
                         </div>
                         <div
                           className="h-2 overflow-hidden rounded-full bg-white/10"
                           role="progressbar"
-                          aria-label="Duyuru gönderim ilerlemesi"
+                          aria-label="Meta duyuru işlemi ilerlemesi"
                           aria-valuemin={0}
                           aria-valuemax={100}
                           aria-valuenow={announcementProgress}
@@ -3559,13 +3617,13 @@ export default function MabelHairArt() {
                       >
                         {announcementSending || announcementSummary.locked ? <Loader2 className="h-5 w-5 animate-spin motion-reduce:animate-none" aria-hidden="true" /> : announcementSummary.canStartNewRound ? <Send className="h-5 w-5" aria-hidden="true" /> : announcementSummary.pending <= 0 && announcementStatus ? <CircleCheck className="h-5 w-5" aria-hidden="true" /> : <Send className="h-5 w-5" aria-hidden="true" />}
                         {announcementSending
-                          ? `Gönderiliyor · ${announcementSummary.sent}/${announcementSummary.recipientCount}`
+                          ? `Meta'ya iletiliyor · ${announcementSummary.sent}/${announcementSummary.recipientCount}`
                           : announcementSummary.locked
                             ? "Gönderim devam ediyor"
                             : announcementSummary.canStartNewRound
                               ? "Duyuruyu tekrar gönder"
                             : announcementSummary.pending <= 0 && announcementStatus
-                              ? announcementSummary.failed > 0 || announcementSummary.processing > 0 ? "Kısmi tamamlandı" : "Gönderim tamamlandı"
+                              ? announcementSummary.failed > 0 || announcementSummary.processing > 0 ? "Kısmi tamamlandı" : "Meta işlemi tamamlandı"
                               : !announcementSummary.canSend && announcementStatus
                                 ? "Gönderim kullanılamıyor"
                                 : "Duyuruyu gönder"}

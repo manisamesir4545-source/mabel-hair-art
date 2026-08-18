@@ -46,6 +46,15 @@ type CampaignSummary = {
   processing: number;
 };
 
+type DeliverySummary = {
+  providerSent: number;
+  delivered: number;
+  read: number;
+  deleted: number;
+  deliveryFailed: number;
+  deliveryUnknown: number;
+};
+
 type CampaignRow = {
   campaign_id: string;
   round_number: number;
@@ -68,6 +77,11 @@ type RequestBody =
 
 function firstRow<T>(value: T | T[] | null): T | null {
   return Array.isArray(value) ? value[0] || null : value;
+}
+
+function safeCount(value: unknown) {
+  const count = Number(value);
+  return Number.isSafeInteger(count) && count >= 0 ? count : 0;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -255,6 +269,38 @@ async function campaignSummary(
   } satisfies CampaignSummary;
 }
 
+async function loadDeliverySummary(
+  supabase: SupabaseAdmin,
+  roundId: string,
+): Promise<DeliverySummary> {
+  const { data, error } = await supabase.rpc(
+    "get_broadcast_delivery_summary",
+    { p_campaign_id: roundId },
+  );
+  if (error) throw error;
+
+  const row = firstRow(data) as Record<string, unknown> | null;
+  if (!row) {
+    return {
+      providerSent: 0,
+      delivered: 0,
+      read: 0,
+      deleted: 0,
+      deliveryFailed: 0,
+      deliveryUnknown: 0,
+    };
+  }
+
+  return {
+    providerSent: safeCount(row.sent_count),
+    delivered: safeCount(row.delivered_count),
+    read: safeCount(row.read_count),
+    deleted: safeCount(row.deleted_count),
+    deliveryFailed: safeCount(row.delivery_failed_count),
+    deliveryUnknown: safeCount(row.unknown_count),
+  };
+}
+
 function campaignLocked(campaign: CampaignRow | null) {
   return campaign?.state === "running" && Boolean(campaign.locked_until) &&
     new Date(String(campaign.locked_until)).getTime() > Date.now();
@@ -275,6 +321,7 @@ function statusPayload(
   recipientData: RecipientData,
   approval: WhatsAppTemplateApproval | null,
   campaign: CampaignRow | null,
+  delivery: DeliverySummary | null = null,
 ) {
   const templateStatus = approval?.status || "UNAVAILABLE";
   const locked = campaignLocked(campaign);
@@ -289,12 +336,19 @@ function statusPayload(
     template: TEMPLATE_NAME,
     templateName: TEMPLATE_NAME,
     templateStatus,
+    templateCategory: approval?.category || null,
     templateLanguage: approval?.language || null,
     templateCheckedAt: approval?.checkedAt || null,
     recipientCount: summary.recipientCount,
     invalidRecipientCount: recipientData.invalidRecipientCount,
     optedOutCount: recipientData.optedOutCount,
     sent: summary.sent,
+    providerSent: delivery?.providerSent || 0,
+    delivered: delivery?.delivered || 0,
+    read: delivery?.read || 0,
+    deleted: delivery?.deleted || 0,
+    deliveryFailed: delivery?.deliveryFailed || 0,
+    deliveryUnknown: delivery?.deliveryUnknown ?? summary.sent,
     failed: summary.failed,
     pending: summary.pending,
     processing: summary.processing,
@@ -445,12 +499,13 @@ async function loadRoundContext(
   roundId: string,
 ) {
   const recipientData = await loadRecipients(supabase, roundId);
-  const [summary, campaign] = await Promise.all([
+  const [summary, campaign, delivery] = await Promise.all([
     campaignSummary(supabase, roundId, recipientData.recipients),
     loadCampaign(supabase, roundId),
+    loadDeliverySummary(supabase, roundId),
   ]);
   if (!campaign) throw new Error("Broadcast round not found");
-  return { recipientData, summary, campaign };
+  return { recipientData, summary, campaign, delivery };
 }
 
 Deno.serve(async (req) => {
@@ -543,6 +598,7 @@ Deno.serve(async (req) => {
           currentContext.recipientData,
           null,
           currentContext.campaign,
+          currentContext.delivery,
         )
         : {
           campaign: "",
@@ -568,6 +624,7 @@ Deno.serve(async (req) => {
           currentContext.recipientData,
           approval,
           currentContext.campaign,
+          currentContext.delivery,
         )
         : null;
 
@@ -622,6 +679,7 @@ Deno.serve(async (req) => {
         preparedContext.recipientData,
         approval,
         preparedContext.campaign,
+        preparedContext.delivery,
       );
       if (
         preparedContext.campaign.recipient_count !== prepared.recipient_count ||
@@ -650,12 +708,13 @@ Deno.serve(async (req) => {
     }
 
     if (!currentContext) throw new Error("Broadcast round not configured");
-    const { recipientData, summary, campaign } = currentContext;
+    const { recipientData, summary, campaign, delivery } = currentContext;
     const currentStatus = statusPayload(
       summary,
       recipientData,
       approval,
       campaign,
+      delivery,
     );
     if (body.action === "status") {
       return adminJson(req, { ok: true, ...currentStatus });
@@ -756,7 +815,10 @@ Deno.serve(async (req) => {
         roundId,
         recipientData.recipients,
       );
-      const latestCampaign = await loadCampaign(supabase, roundId);
+      const [latestCampaign, latestDelivery] = await Promise.all([
+        loadCampaign(supabase, roundId),
+        loadDeliverySummary(supabase, roundId),
+      ]);
       return adminJson(req, {
         ok: false,
         ...statusPayload(
@@ -764,6 +826,7 @@ Deno.serve(async (req) => {
           recipientData,
           approval,
           latestCampaign,
+          latestDelivery,
         ),
         message: "Bu kampanya için başka bir gönderim halen devam ediyor.",
       }, 409);
@@ -822,7 +885,10 @@ Deno.serve(async (req) => {
       ) {
         throw new Error("Campaign completion rejected");
       }
-      const finalCampaign = await loadCampaign(supabase, roundId);
+      const [finalCampaign, finalDelivery] = await Promise.all([
+        loadCampaign(supabase, roundId),
+        loadDeliverySummary(supabase, roundId),
+      ]);
       return adminJson(req, {
         ok: true,
         ...statusPayload(
@@ -830,6 +896,7 @@ Deno.serve(async (req) => {
           recipientData,
           approval,
           finalCampaign || campaign,
+          finalDelivery,
         ),
         skipped,
         message: finalSummary.processing > 0
@@ -860,6 +927,8 @@ Deno.serve(async (req) => {
       const failedCampaign = await loadCampaign(supabase, roundId).catch(() =>
         campaign
       );
+      const failedDelivery = await loadDeliverySummary(supabase, roundId)
+        .catch(() => delivery);
       return adminJson(req, {
         ok: false,
         ...statusPayload(
@@ -867,6 +936,7 @@ Deno.serve(async (req) => {
           recipientData,
           approval,
           failedCampaign || campaign,
+          failedDelivery,
         ),
         skipped,
         message:

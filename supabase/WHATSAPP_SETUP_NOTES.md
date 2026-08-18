@@ -70,6 +70,10 @@ tablosundaki telefonlari haric tutar. Bu tablo, alici snapshot'i hazirlandiktan
 sonra degisse bile Meta gonderim rezervasyonu alinirken yeniden kontrol edilir.
 
 Meta WhatsApp Manager'da template'in ayni ad/dil ile `APPROVED` olmasi gerekir.
+`mabel_calisma_bilgisi_v2` Meta tarafindan su anda `MARKETING` (Pazarlama)
+kategorisinde siniflandirilmistir. API istemcisi bu kategoriyi Bilgilendirme olarak
+zorlayamaz; kisa aralikli tekrarlar Meta tarafindan kabul edilip sonradan teslim
+edilmeyebilir.
 Edge Function her `status` ve `send` isteginde WABA `message_templates` endpointinden
 durumu yeniden kontrol eder ve APPROVED degilse fail-closed davranarak gondermez.
 Token'in hem `whatsapp_business_management` (template sorgusu) hem de
@@ -97,6 +101,8 @@ ADMIN_PIN=<eski frontend PIN'inden farkli, yeni ve guclu bir PIN/parola>
 ADMIN_SESSION_SECRET=<en az 32 byte kriptografik rastgele secret>
 ADMIN_ALLOWED_ORIGINS=https://mabelhairart.com.tr,https://www.mabelhairart.com.tr
 WHATSAPP_BUSINESS_ACCOUNT_ID=<WABA ID>
+WHATSAPP_APP_SECRET=<Meta uygulamasinin App Secret degeri>
+WHATSAPP_WEBHOOK_VERIFY_TOKEN=<en az 32 byte kriptografik rastgele token>
 ```
 
 Ornek secret uretimi: `openssl rand -base64 48`. `ADMIN_PIN` ve
@@ -120,6 +126,7 @@ oturum token'i yalniz `sessionStorage`/bellekte tutulmali ve cikista silinmelidi
 ```text
 npx supabase functions deploy admin-session --no-verify-jwt --project-ref qtyehohkrnxudeeeuuyy
 npx supabase functions deploy send-customer-announcement --no-verify-jwt --project-ref qtyehohkrnxudeeeuuyy
+npx supabase functions deploy whatsapp-status-webhook --no-verify-jwt --project-ref qtyehohkrnxudeeeuuyy
 ```
 
 Turkce karakterleri korumak icin function kaynagi dosya sisteminden Supabase CLI ile
@@ -148,4 +155,30 @@ atomik olarak rezerve edilir. API yanitindaki `pending` henuz rezerve edilmemis 
 sonraki cagrida islenebilecek kisileri; `processing` ise onceki bir timeout/crash
 nedeniyle sonucu belirsiz kalan atomik rezervasyonlari ifade eder. `sent`, `failed`
 ve `processing` alicilari ayni kampanyada tekrar gonderilmez; yeni bir kampanya icin
-yeni campaign ID ile kod deploy edilmelidir.
+yeni ve degistirilemez bir tur (`...:r2`, `...:r3`) hazirlanir.
+
+### Gercek teslimat takibi
+
+Graph API'nin HTTP 2xx ve `message_status=accepted` yaniti yalniz Meta'nin istegi
+kabul ettigini gosterir; alici cihazina teslim edildigini gostermez. Mevcut
+`message_logs.status='sent'` bu API-kabul sozlesmesini korur. Imzali Meta webhook'u
+geldikten sonra ayri `delivery_status` alani `sent`, `delivered`, `read`, `failed`
+veya `deleted` olur.
+
+Meta callback URL:
+
+```text
+https://qtyehohkrnxudeeeuuyy.supabase.co/functions/v1/whatsapp-status-webhook
+```
+
+Meta Developer panelinde callback ve verify token kaydedilmeli, `messages` webhook
+alani etkinlestirilmeli ve uygulama WABA'ya abone edilmelidir. Uygulama
+`Unpublished` durumundayken Meta yalniz panelden gonderilen test webhook'larini
+iletir; gercek mesaj durumlari icin uygulama yayinlanmalidir. Yayin oncesinde kamuya
+acik bir gizlilik politikasi URL'si ve gercek iletisim e-postasi gereklidir.
+
+`whatsapp-status-webhook` Supabase JWT dogrulamasini kullanmaz; Meta GET challenge
+tokenini ve POST isteklerinde ham govde uzerindeki `X-Hub-Signature-256` HMAC
+imzasini kendisi dogruladigi icin `--no-verify-jwt` ile deploy edilir. Secret'lari
+takip edilen `.env` dosyasina yazmayin; yalniz Supabase Edge Function Secrets
+ekraninda saklayin.
