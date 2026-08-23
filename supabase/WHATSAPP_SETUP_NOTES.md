@@ -26,6 +26,10 @@ WHATSAPP_ADMIN_PHONE=905396201897
 WHATSAPP_TEMPLATE_LANGUAGE=tr
 WHATSAPP_REMINDER_HOURS=2
 
+Opsiyonel (varsayilan 50, en fazla 100):
+
+WHATSAPP_REMINDER_BATCH_LIMIT=50
+
 ## SQL
 
 Ilk randevu mesaj log kurulumu gerekiyorsa Supabase SQL Editor'de
@@ -33,7 +37,11 @@ Ilk randevu mesaj log kurulumu gerekiyorsa Supabase SQL Editor'de
 `message_logs` tablosunu PUBLIC/anon/authenticated erisimine acmaz. Duyuru icin
 ayrica asagidaki migration uygulanmalidir.
 
-Hatirlatma cron'u icin `supabase/schedule_reminders.sql` dosyasi calistirildi.
+Hatirlatma cron'u icin
+`supabase/migrations/20260823024640_secure_appointment_reminders.sql`
+migration'i uygulanmalidir. Migration, cron anahtarini Supabase Vault icinde uretir;
+kaynak koda veya Edge Function secret'larina kopyalamaz. `schedule_reminders.sql`
+yalniz temiz kurulumlar icin ayni guvenli cron taniminin bagimsiz kopyasidir.
 Aktif cron:
 
 send-appointment-reminders-every-10-minutes -> */10 * * * *
@@ -43,9 +51,18 @@ send-appointment-reminders-every-10-minutes -> */10 * * * *
 Supabase CLI ile:
 
 npx supabase functions deploy send-whatsapp-message --project-ref qtyehohkrnxudeeeuuyy
-npx supabase functions deploy send-appointment-reminders --project-ref qtyehohkrnxudeeeuuyy
+npx supabase functions deploy send-appointment-reminders --no-verify-jwt --project-ref qtyehohkrnxudeeeuuyy
 
 Frontend degisikligi icin Vercel deploy gerekir.
+
+`send-appointment-reminders` gateway JWT dogrulamasini kullanmaz; bunun yerine yalniz
+Vault'taki `x-cron-secret` degerini service-role RPC ile dogrular. Endpoint yalniz
+POST kabul eder. Hatirlatma fonksiyonu, simdiki andan `WHATSAPP_REMINDER_HOURS`
+ufkuna kadar olan aktif randevulari tarar. Boylece randevu eski dar 20 dakikalik
+pencereden sonra olusturulsa bile sonraki cron cagrisi onu kacirmaz. Her randevu
+icin mesaj Meta'ya gonderilmeden once atomik bir `pending` kaydi ayrilir; ayni
+randevu/tarih/saat icin ikinci kez mesaj gonderilmez. `sent` yine yalniz Meta API
+kabulunu ifade eder; gercek teslimat asagidaki imzali webhook ile izlenir.
 
 Son deploy:
 
