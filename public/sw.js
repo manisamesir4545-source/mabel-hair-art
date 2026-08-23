@@ -1,4 +1,4 @@
-const CACHE_NAME = "mabel-hair-art-pwa-v4";
+const CACHE_NAME = "mabel-hair-art-pwa-v5";
 const APP_SHELL = [
   "/",
   "/manifest.json",
@@ -38,10 +38,12 @@ self.addEventListener("fetch", (event) => {
 
   if (request.mode === "navigate") {
     event.respondWith(
-      fetch(request)
+      fetch(new Request(request, { cache: "reload" }))
         .then((response) => {
-          const copy = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put("/", copy)).catch(() => undefined);
+          if (response.ok && response.headers.get("content-type")?.includes("text/html")) {
+            const copy = response.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put("/", copy)).catch(() => undefined);
+          }
           return response;
         })
         .catch(async () => {

@@ -42,11 +42,107 @@ createRoot(document.getElementById('root')).render(
   </StrictMode>,
 )
 
+const APP_UPDATE_CHECK_INTERVAL_MS = 2 * 60 * 1000;
+const APP_UPDATE_BANNER_ID = "mabel-app-update";
+
+function getAssetSignature(sourceDocument) {
+  return [
+    ...sourceDocument.querySelectorAll('script[type="module"][src], link[rel="stylesheet"][href]'),
+  ]
+    .map((element) => element.getAttribute("src") || element.getAttribute("href"))
+    .filter(Boolean)
+    .sort()
+    .join("|");
+}
+
+const loadedAssetSignature = getAssetSignature(document);
+
+function showAppUpdateNotice() {
+  if (document.getElementById(APP_UPDATE_BANNER_ID)) return;
+
+  const notice = document.createElement("aside");
+  notice.id = APP_UPDATE_BANNER_ID;
+  notice.setAttribute("role", "status");
+  notice.setAttribute("aria-live", "polite");
+  notice.style.cssText = [
+    "position:fixed",
+    "z-index:2147483647",
+    "left:50%",
+    "bottom:max(16px, env(safe-area-inset-bottom))",
+    "transform:translateX(-50%)",
+    "display:flex",
+    "align-items:center",
+    "gap:12px",
+    "width:min(92vw, 560px)",
+    "padding:12px 14px",
+    "border:1px solid rgba(253,224,71,.45)",
+    "border-radius:16px",
+    "background:#17140b",
+    "box-shadow:0 18px 55px rgba(0,0,0,.55)",
+    "color:#fff",
+    "font:600 14px/1.4 system-ui,sans-serif",
+  ].join(";");
+
+  const message = document.createElement("span");
+  message.style.flex = "1";
+  message.textContent = "Mabel Hair Art panelinin yeni sürümü hazır.";
+
+  const refreshButton = document.createElement("button");
+  refreshButton.type = "button";
+  refreshButton.textContent = "Şimdi güncelle";
+  refreshButton.style.cssText = [
+    "min-height:44px",
+    "padding:0 16px",
+    "border:0",
+    "border-radius:12px",
+    "background:#facc15",
+    "color:#111",
+    "font:800 14px system-ui,sans-serif",
+    "cursor:pointer",
+    "white-space:nowrap",
+  ].join(";");
+  refreshButton.addEventListener("click", () => window.location.reload());
+
+  notice.append(message, refreshButton);
+  document.body.append(notice);
+}
+
+async function checkForAppUpdate() {
+  if (!loadedAssetSignature || !navigator.onLine) return;
+
+  try {
+    const response = await fetch(`/?app-update-check=${Date.now()}`, {
+      cache: "no-store",
+      credentials: "same-origin",
+      headers: {
+        Accept: "text/html",
+        "Cache-Control": "no-cache",
+      },
+    });
+    if (!response.ok) return;
+
+    const html = await response.text();
+    const latestDocument = new DOMParser().parseFromString(html, "text/html");
+    const latestAssetSignature = getAssetSignature(latestDocument);
+
+    if (latestAssetSignature && latestAssetSignature !== loadedAssetSignature) {
+      showAppUpdateNotice();
+    }
+  } catch {
+    // Ağ kesintisinde mevcut çevrimdışı sürüm çalışmaya devam eder.
+  }
+}
+
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
-    navigator.serviceWorker.register("/sw.js")
+    navigator.serviceWorker.register("/sw.js", { updateViaCache: "none" })
       .then((registration) => {
-        registration.update?.();
+        const requestServiceWorkerUpdate = () => {
+          registration.update().catch(() => undefined);
+        };
+
+        requestServiceWorkerUpdate();
+        window.setInterval(requestServiceWorkerUpdate, APP_UPDATE_CHECK_INTERVAL_MS);
 
         if (registration.waiting) {
           registration.waiting.postMessage({ type: "SKIP_WAITING" });
@@ -71,3 +167,13 @@ if ("serviceWorker" in navigator) {
     });
   });
 }
+
+window.addEventListener("load", () => {
+  checkForAppUpdate();
+  window.setInterval(checkForAppUpdate, APP_UPDATE_CHECK_INTERVAL_MS);
+});
+
+window.addEventListener("focus", checkForAppUpdate);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") checkForAppUpdate();
+});
