@@ -115,10 +115,21 @@ devam etmez. Token'in hem `whatsapp_business_management` (template sorgusu) hem 
 `whatsapp_business_messaging` (mesaj gonderimi) yetkisi olmalidir.
 
 Her gonderim ayri ve degistirilemez bir tur kimligi kullanir (`...:r2`, `...:r3`).
-Tamamlanan turun loglari silinmez veya sifirlanmaz. Yeni tur, bu serinin sabit seed
-snapshot'ini kopyalar ve service-role erisimli `broadcast_suppressions` tablosundaki
-telefonlari haric tutar. Suppression tablosu snapshot'tan sonra degisse bile Meta
-gonderim rezervasyonu alinirken tekrar kontrol edilir.
+Tamamlanan turun loglari silinmez veya sifirlanmaz. Hic attempt/log olmayan en son
+`idle` tur ile yeni turlar; `app_state.data.customerAccounts` ve `appointments`
+birlesiminden server-side normalize/dedupe edilerek guncellenir. Herhangi bir account
+kaydindaki opt-out ayni telefonu tum kaynaklardan dislar; service-role erisimli
+`broadcast_suppressions` da aday listesinden cikarilir. Suppression, snapshot'tan
+sonra degisse bile Meta gonderim rezervasyonu alinirken tekrar kontrol edilir.
+
+Status yaniti sirali normalize telefon setinin SHA-256 ozetini `recipientHash` olarak
+dondurur. Send istegi exact `roundId`, `recipientCount` ve `recipientHash` tasir.
+Current adaylar ile count/hash atomik refresh+claim RPC'sinde tekrar hesaplanir;
+liste ayni sayida kalip telefonlardan biri degisse bile 409
+`RECIPIENT_LIST_CHANGED` doner ve hicbir kisi rezerve edilmez/gonderilmez. Raw kaynak
+5000 account ve 10000 appointment, nihai aday listesi 1000 ile sinirlidir. Mevcut
+snapshot'a gore tek refresh buyumesi `max(25, %25)` ustundeyse fail-closed olur; bu
+sinir izin veya yetkilendirme kaniti degil, yalniz blast-radius korumasidir.
 
 Eski `mabel_reopening_2026_08_18_v2` serisi ve
 `mabel_calisma_bilgisi_v2`/`MARKETING` kampanya-log gecmisi yalniz audit icin
@@ -134,11 +145,14 @@ korunur; yeni Edge runtime bu eski template veya seriye baglanmaz.
 3. Suppression'in rezervasyon aninda tekrar kontrolu icin
    `supabase/migrations/20260817185535_enforce_broadcast_suppressions_at_send.sql`
    migration'ini uygula.
-4. Adres guncellemesi serisi ve sabit snapshot icin
+4. Adres guncellemesi serisi ve ilk snapshot icin
    `supabase/migrations/20260823033550_add_service_location_update_announcement.sql`
    migration'ini uygula.
-5. Asagidaki Edge Function secret'larini ekle.
-6. Sonra `admin-session` ve `send-customer-announcement` function'larini deploy et.
+5. Current aday refresh'i, hash-bagli atomik claim ve dinamik yeni turlar icin
+   `supabase/migrations/20260823103804_refresh_current_announcement_recipients.sql`
+   migration'ini uygula.
+6. Asagidaki Edge Function secret'larini ekle.
+7. Sonra `admin-session` ve `send-customer-announcement` function'larini deploy et.
 
 Migration; PIN brute-force rate limit tablosunu, lease tabanli kampanya kilidini ve
 mesaj gonderilmeden once alinan atomik kisi rezervasyonunu kurar. Ayrica telefon ve
@@ -190,18 +204,22 @@ anahtari kullaniyor ve bu anahtar JWT degildir. Gateway JWT kontrolu kapali olsa
 endpointler acik degildir; `admin-session` server-side PIN + rate limit uygular,
 duyuru endpointi ise kisa omurlu `x-admin-session` HMAC tokenini zorunlu tutar.
 
-Ilk tarihsel `mabel_reopening_2026_08_18_v2` seed snapshot'i olusturulurken alicilar
+Ilk tarihsel `mabel_reopening_2026_08_18_v2` seed snapshot'i olusturulurken adaylar
 server-side olarak `app_state.data.customerAccounts` ile `appointments` verilerinden
-bir kez uretilmisti. Yeni adres guncellemesi migration'i bu istemci-yazilabilir
-kaynaklara kesinlikle donmez. Yalniz RLS acik, PUBLIC/anon/authenticated yetkileri
-kaldirilmis eski frozen `broadcast_recipients` seed snapshot'ini kopyalar ve migration
-anindaki `broadcast_suppressions` telefonlarini cikarir. Eski campaign ve
-`message_logs` satirlarinda UPDATE/DELETE yapmaz. Runtime Edge Function da yalniz
-yeni sabit snapshot'i okur. Bu snapshot WhatsApp opt-in kaniti degildir: ilk kaynak
-eksik consent alanlarini varsayilan olarak dahil ediyordu ve appointment telefonlari
-icin pozitif opt-in sarti yoktu. Utility kategorisi de izin yerine gecmez. Gercek
-gonderimden once 157 alicinin her biri icin gecerli WhatsApp opt-in dogrulanmali;
-opt-out bildiren veya iznini geri cekenler `broadcast_suppressions` ile cikarilmalidir.
+bir kez uretilmisti. Adres serisinin ilk migration'i bu frozen snapshot'i kopyaladi;
+forward-only current-aday migration'i ise yalniz exact adres serisinin en son,
+hic kullanilmamis `idle` turunu guncel union ile reconcile eder ve yeni turlari da
+guncel uniondan kurar. Attempt/log baslamis veya tamamlanmis turlarin recipient,
+campaign ve `message_logs` audit kayitlari degistirilmez. 23 Agustos 2026 preflight
+aninda union 163 adaydi; bu yalniz gecici gozlemdir ve kodda/migration'da sabit sayi
+degildir.
+
+Bu aday/eligibility listesi WhatsApp opt-in kaniti degildir: eksik consent alanlari
+geriye uyumluluk icin dahil edilir ve appointment telefonlarinda pozitif opt-in sarti
+yoktur. `UTILITY` kategorisi de izin yerine gecmez. Gercek gonderimden once guncel
+adaylarin her biri icin gecerli WhatsApp opt-in ayrica dogrulanmali; opt-out bildiren
+veya iznini geri cekenler `broadcast_suppressions` ile cikarilmalidir. Listeyi
+"izinli musteriler" olarak adlandirmayin.
 
 Ayni campaign ID + normalize telefon icin `message_logs.dedupe_key` gonderimden once
 atomik olarak rezerve edilir. API yanitindaki `pending` henuz rezerve edilmemis ve

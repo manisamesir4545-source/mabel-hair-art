@@ -19,6 +19,11 @@ import {
   ANNOUNCEMENT_TEMPLATE_NAME,
   evaluateAnnouncementTemplate,
 } from "./template-policy.ts";
+import {
+  hashRecipientPhones,
+  isRecipientHash,
+  MAX_CURRENT_RECIPIENTS,
+} from "./recipient-snapshot.ts";
 
 const SERIES_ID = ANNOUNCEMENT_SERIES_ID;
 const TEMPLATE_NAME = ANNOUNCEMENT_TEMPLATE_NAME;
@@ -38,6 +43,7 @@ type Recipient = {
 
 type RecipientData = {
   recipients: Recipient[];
+  recipientHash: string;
   invalidRecipientCount: number;
   optedOutCount: number;
 };
@@ -69,6 +75,7 @@ type CampaignRow = {
   round_number: number;
   state: string;
   locked_until: string | null;
+  attempt_count: number;
   recipient_count: number;
 };
 
@@ -79,10 +86,35 @@ type PreparedRound = {
   created: boolean;
 };
 
+type RefreshedRound = {
+  round_id: string;
+  recipient_count: number;
+  recipient_hash: string;
+  refreshed: boolean;
+  expected_recipient_count_matches: boolean;
+};
+
+type ClaimedRound = {
+  acquired: boolean;
+  run_token: string | null;
+  campaign_state: string;
+  lock_expires_at: string | null;
+  recipient_count: number;
+  recipient_hash: string;
+  recipient_list_changed: boolean;
+  expected_recipient_count_matches: boolean;
+  expected_recipient_hash_matches: boolean;
+};
+
 type RequestBody =
   | { action: "status" }
   | { action: "new-round"; requestId: string }
-  | { action: "send"; roundId: string };
+  | {
+    action: "send";
+    roundId: string;
+    recipientCount: number;
+    recipientHash: string;
+  };
 
 function firstRow<T>(value: T | T[] | null): T | null {
   return Array.isArray(value) ? value[0] || null : value;
@@ -122,10 +154,20 @@ function parseRequestBody(value: unknown): RequestBody | null {
     return { action: "new-round", requestId: value.requestId };
   }
   if (
-    value.action === "send" && keys === "action,roundId" &&
-    isRoundId(value.roundId)
+    value.action === "send" &&
+    keys === "action,recipientCount,recipientHash,roundId" &&
+    isRoundId(value.roundId) &&
+    Number.isSafeInteger(value.recipientCount) &&
+    Number(value.recipientCount) >= 1 &&
+    Number(value.recipientCount) <= MAX_CURRENT_RECIPIENTS &&
+    isRecipientHash(value.recipientHash)
   ) {
-    return { action: "send", roundId: value.roundId };
+    return {
+      action: "send",
+      roundId: value.roundId,
+      recipientCount: Number(value.recipientCount),
+      recipientHash: value.recipientHash,
+    };
   }
   return null;
 }
@@ -175,8 +217,12 @@ async function loadRecipients(
       recipients.set(phone, { phone });
     }
     if (batch.length < PAGE_SIZE) {
+      const recipientList = [...recipients.values()];
       return {
-        recipients: [...recipients.values()],
+        recipients: recipientList,
+        recipientHash: await hashRecipientPhones(
+          recipientList.map((recipient) => recipient.phone),
+        ),
         invalidRecipientCount,
         optedOutCount: 0,
       };
@@ -207,7 +253,7 @@ async function loadCampaign(supabase: SupabaseAdmin, roundId: string) {
   const { data, error } = await supabase
     .from("broadcast_campaigns")
     .select(
-      "campaign_id, round_number, state, locked_until, recipient_count",
+      "campaign_id, round_number, state, locked_until, attempt_count, recipient_count",
     )
     .eq("campaign_id", roundId)
     .eq("series_id", SERIES_ID)
@@ -220,7 +266,7 @@ async function loadLatestRound(supabase: SupabaseAdmin) {
   const { data, error } = await supabase
     .from("broadcast_campaigns")
     .select(
-      "campaign_id, round_number, state, locked_until, recipient_count",
+      "campaign_id, round_number, state, locked_until, attempt_count, recipient_count",
     )
     .eq("series_id", SERIES_ID)
     .order("round_number", { ascending: false })
@@ -381,6 +427,7 @@ function statusPayload(
     requiredTemplateLanguage: TEMPLATE_LANGUAGE,
     templateCheckedAt: approval?.checkedAt || null,
     recipientCount: summary.recipientCount,
+    recipientHash: recipientData.recipientHash,
     invalidRecipientCount: recipientData.invalidRecipientCount,
     optedOutCount: recipientData.optedOutCount,
     sent: summary.sent,
@@ -425,6 +472,78 @@ async function prepareRound(
     throw new Error("Invalid prepared broadcast round response");
   }
   return prepared;
+}
+
+async function refreshIdleRound(
+  supabase: SupabaseAdmin,
+  roundId: string,
+) {
+  const { data, error } = await supabase.rpc(
+    "refresh_service_location_broadcast_recipients",
+    {
+      p_campaign_id: roundId,
+      p_series_id: SERIES_ID,
+      p_template_name: TEMPLATE_NAME,
+      p_template_parameters: Array.from(TEMPLATE_PARAMETERS),
+      p_expected_recipient_count: null,
+    },
+  );
+  if (error) throw error;
+
+  const refreshed = firstRow(data) as RefreshedRound | null;
+  if (
+    !refreshed || refreshed.round_id !== roundId ||
+    !Number.isSafeInteger(refreshed.recipient_count) ||
+    refreshed.recipient_count < 1 ||
+    refreshed.recipient_count > MAX_CURRENT_RECIPIENTS ||
+    !isRecipientHash(refreshed.recipient_hash) ||
+    typeof refreshed.refreshed !== "boolean" ||
+    typeof refreshed.expected_recipient_count_matches !== "boolean"
+  ) {
+    throw new Error("Invalid refreshed broadcast round response");
+  }
+  return refreshed;
+}
+
+async function claimCurrentRound(
+  supabase: SupabaseAdmin,
+  roundId: string,
+  expectedRecipientCount: number,
+  expectedRecipientHash: string,
+) {
+  const { data, error } = await supabase.rpc(
+    "claim_current_service_location_broadcast",
+    {
+      p_campaign_id: roundId,
+      p_series_id: SERIES_ID,
+      p_template_name: TEMPLATE_NAME,
+      p_template_parameters: Array.from(TEMPLATE_PARAMETERS),
+      p_expected_recipient_count: expectedRecipientCount,
+      p_expected_recipient_hash: expectedRecipientHash,
+      p_lease_seconds: LEASE_SECONDS,
+    },
+  );
+  if (error) throw error;
+
+  const claim = firstRow(data) as ClaimedRound | null;
+  if (
+    !claim || typeof claim.acquired !== "boolean" ||
+    (claim.run_token !== null && !isUuid(claim.run_token)) ||
+    typeof claim.campaign_state !== "string" ||
+    !Number.isSafeInteger(claim.recipient_count) ||
+    claim.recipient_count < 1 ||
+    claim.recipient_count > MAX_CURRENT_RECIPIENTS ||
+    !isRecipientHash(claim.recipient_hash) ||
+    typeof claim.recipient_list_changed !== "boolean" ||
+    typeof claim.expected_recipient_count_matches !== "boolean" ||
+    typeof claim.expected_recipient_hash_matches !== "boolean"
+  ) {
+    throw new Error("Invalid claimed broadcast round response");
+  }
+  if (claim.acquired && !claim.run_token) {
+    throw new Error("Claimed broadcast round has no run token");
+  }
+  return claim;
 }
 
 async function finalizeMessage(
@@ -611,7 +730,16 @@ Deno.serve(async (req) => {
 
   let diagnosticStage = "load_latest_round";
   try {
-    const latestRound = await loadLatestRound(supabase);
+    let latestRound = await loadLatestRound(supabase);
+    if (
+      action !== "send" && latestRound?.state === "idle" &&
+      latestRound.attempt_count === 0
+    ) {
+      diagnosticStage = "refresh_idle_round";
+      await refreshIdleRound(supabase, latestRound.campaign_id);
+      diagnosticStage = "reload_latest_round";
+      latestRound = await loadLatestRound(supabase);
+    }
     let currentContext: Awaited<ReturnType<typeof loadRoundContext>> | null =
       null;
     if (latestRound) {
@@ -758,7 +886,7 @@ Deno.serve(async (req) => {
     }
 
     if (!currentContext) throw new Error("Broadcast round not configured");
-    const { recipientData, summary, campaign, delivery } = currentContext;
+    let { recipientData, summary, campaign, delivery } = currentContext;
     const currentStatus = statusPayload(
       summary,
       recipientData,
@@ -783,6 +911,18 @@ Deno.serve(async (req) => {
         ...currentStatus,
         message:
           "İstenen gönderim turu güncel değil. Durumu yenileyip tekrar onaylayın.",
+      }, 409);
+    }
+    if (
+      body.recipientCount !== summary.recipientCount ||
+      body.recipientHash !== recipientData.recipientHash
+    ) {
+      return adminJson(req, {
+        ok: false,
+        code: "RECIPIENT_LIST_CHANGED",
+        ...currentStatus,
+        message:
+          "Alıcı listesi değişti. Güncel listeyi kontrol edip gönderimi yeniden onaylayın.",
       }, 409);
     }
     if (!isApprovedUtilityTemplate(approval)) {
@@ -880,49 +1020,88 @@ Deno.serve(async (req) => {
       }, 409);
     }
 
-    diagnosticStage = "claim_campaign";
-    const { data: claimData, error: claimError } = await supabase.rpc(
-      "claim_broadcast_campaign",
-      {
-        p_campaign_id: roundId,
-        p_template_name: TEMPLATE_NAME,
-        p_template_parameters: Array.from(TEMPLATE_PARAMETERS),
-        p_recipient_count: recipientData.recipients.length,
-        p_lease_seconds: LEASE_SECONDS,
-      },
+    diagnosticStage = "refresh_and_claim_campaign";
+    const claim = await claimCurrentRound(
+      supabase,
+      roundId,
+      body.recipientCount,
+      body.recipientHash,
     );
-    if (claimError) throw claimError;
-    const claim = firstRow(claimData) as {
-      acquired: boolean;
-      run_token: string;
-      campaign_state: string;
-      lock_expires_at: string;
-    } | null;
 
-    if (!claim?.acquired || !claim.run_token) {
-      const latestSummary = await campaignSummary(
-        supabase,
-        roundId,
-        recipientData.recipients,
+    if (
+      claim.recipient_list_changed ||
+      !claim.expected_recipient_count_matches ||
+      !claim.expected_recipient_hash_matches
+    ) {
+      diagnosticStage = "reload_changed_recipient_list";
+      const changedContext = await loadRoundContext(supabase, roundId);
+      const changedStatus = statusPayload(
+        changedContext.summary,
+        changedContext.recipientData,
+        approval,
+        changedContext.campaign,
+        changedContext.delivery,
       );
-      const [latestCampaign, latestDelivery] = await Promise.all([
-        loadCampaign(supabase, roundId),
-        loadDeliverySummary(supabase, roundId),
-      ]);
+      return adminJson(req, {
+        ok: false,
+        code: "RECIPIENT_LIST_CHANGED",
+        ...changedStatus,
+        recipientCount: claim.recipient_count,
+        recipientHash: claim.recipient_hash,
+        message:
+          "Alıcı listesi değişti. Güncel listeyi kontrol edip gönderimi yeniden onaylayın.",
+      }, 409);
+    }
+
+    if (!claim.acquired || !claim.run_token) {
+      diagnosticStage = "reload_unclaimed_round";
+      const latestContext = await loadRoundContext(supabase, roundId);
       return adminJson(req, {
         ok: false,
         ...statusPayload(
-          latestSummary,
-          recipientData,
+          latestContext.summary,
+          latestContext.recipientData,
           approval,
-          latestCampaign,
-          latestDelivery,
+          latestContext.campaign,
+          latestContext.delivery,
         ),
         message: "Bu kampanya için başka bir gönderim halen devam ediyor.",
       }, 409);
     }
 
     const runToken = claim.run_token;
+    diagnosticStage = "load_claimed_round";
+    const claimedContext = await loadRoundContext(supabase, roundId);
+    recipientData = claimedContext.recipientData;
+    summary = claimedContext.summary;
+    campaign = claimedContext.campaign;
+    delivery = claimedContext.delivery;
+    if (
+      summary.recipientCount !== claim.recipient_count ||
+      recipientData.recipientHash !== claim.recipient_hash
+    ) {
+      await completeCampaign(
+        supabase,
+        roundId,
+        runToken,
+        summary,
+        0,
+        "Claimed recipient snapshot changed",
+      ).catch(() => false);
+      return adminJson(req, {
+        ok: false,
+        code: "RECIPIENT_LIST_CHANGED",
+        ...statusPayload(
+          summary,
+          recipientData,
+          approval,
+          campaign,
+          delivery,
+        ),
+        message:
+          "Alıcı listesi değişti. Hiçbir mesaj gönderilmedi; durumu yenileyip tekrar onaylayın.",
+      }, 409);
+    }
     const configuredBatchSize = Number(
       Deno.env.get("WHATSAPP_BROADCAST_BATCH_SIZE") || "5",
     );
