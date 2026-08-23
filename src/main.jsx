@@ -135,6 +135,8 @@ async function checkForAppUpdate() {
 
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
+    const hadActiveServiceWorker = Boolean(navigator.serviceWorker.controller);
+
     navigator.serviceWorker.register("/sw.js", { updateViaCache: "none" })
       .then((registration) => {
         const requestServiceWorkerUpdate = () => {
@@ -159,11 +161,8 @@ if ("serviceWorker" in navigator) {
       })
       .catch(console.error);
 
-    let refreshed = false;
     navigator.serviceWorker.addEventListener("controllerchange", () => {
-      if (refreshed) return;
-      refreshed = true;
-      window.location.reload();
+      if (hadActiveServiceWorker) showAppUpdateNotice();
     });
   });
 }
