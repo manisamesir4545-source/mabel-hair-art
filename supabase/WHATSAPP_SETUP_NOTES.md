@@ -70,31 +70,59 @@ Son deploy:
 - Production site: https://mabelhairart.com.tr
 - Supabase project ref: `qtyehohkrnxudeeeuuyy`
 
-## Guvenli musteri duyurusu (19 Agustos 2026)
+## Guvenli is yeri adres guncellemesi
 
-Sabit seri ayarlari Edge Function icindedir; istemci telefon, alici, template veya
-kampanya kimligi uretemez:
+Aktif duyuru serisi Edge Function icinde sabittir; istemci telefon, alici, template,
+adres parametresi veya kampanya kimligi uretemez:
 
-- Template: `mabel_calisma_bilgisi_v2`
-- Dil: `tr`
-- Series ID: `mabel_reopening_2026_08_18_v2`
-- Body parametreleri: musteri adi ve `19 Ağustos 2026`
+- Template: `is_yeri_adres_guncellemesi`
+- Dil: exact `tr`
+- Zorunlu Meta kategorisi: exact `UTILITY`
+- Series ID ve ilk campaign ID: `mabel_is_yeri_adres_guncellemesi_v1`
+- BODY parametresi (tek): `Kültür, Hükümet Cd. No:54, 35800 Aliağa/İzmir`
+- Baslik: `Adres Bilgisi Güncellemesi`
+- Statik buton: `Konumu Görüntüle`
+- Statik Maps URL:
+  `https://www.google.com/maps/search/?api=1&query=38.801010673611486%2C26.974653153176668`
+
+Meta template BODY metni:
+
+```text
+Mabel Hair Art iş yeri adresimiz değişmiştir.
+
+Güncel adresimiz:
+{{1}}
+
+Güncel konum bilgisine aşağıdaki bağlantı üzerinden ulaşabilirsiniz.
+```
+
+Template'te tarih veya musteri adi parametresi yoktur. Maps butonu statik oldugu
+icin runtime button component/parametresi de gonderilmez; Graph API BODY icinde
+yalniz adres degeri vardir.
+
+Edge Function her `status`, `new-round` ve `send` isteginde WABA
+`message_templates` endpointinden template durumunu, dilini, kategorisini ve
+component listesini yeniden kontrol eder. Baslik, BODY metni ve tek statik URL
+butonunun metni/Google Maps koordinati da yukaridaki fingerprint ile exact
+eslesmelidir. `APPROVED + UTILITY + tr + exact components` kosullarindan biri
+farkliysa fail-closed olur:
+status `templateEligible=false`, `canSend=false` ve `canStartNewRound=false`
+gosterir; `new-round` ile `send` HTTP 409 ile engellenir. Meta sonradan template'i
+`MARKETING` olarak yeniden siniflandirirsa kod bu kategoriyi Utility gibi gostermez
+ve gondermez. `send` ayrica kampanya claim'inden hemen once ve her batch'ten once
+Meta fingerprint'ini tekrar sorgular; drift veya sorgu hatasinda kalan alicilara
+devam etmez. Token'in hem `whatsapp_business_management` (template sorgusu) hem de
+`whatsapp_business_messaging` (mesaj gonderimi) yetkisi olmalidir.
 
 Her gonderim ayri ve degistirilemez bir tur kimligi kullanir (`...:r2`, `...:r3`).
-Tamamlanan turun loglari silinmez veya sifirlanmaz. Yeni tur, ilk dogrulanmis alici
-snapshot'ini kopyalar ve yalniz service-role erisimli `broadcast_suppressions`
-tablosundaki telefonlari haric tutar. Bu tablo, alici snapshot'i hazirlandiktan
-sonra degisse bile Meta gonderim rezervasyonu alinirken yeniden kontrol edilir.
+Tamamlanan turun loglari silinmez veya sifirlanmaz. Yeni tur, bu serinin sabit seed
+snapshot'ini kopyalar ve service-role erisimli `broadcast_suppressions` tablosundaki
+telefonlari haric tutar. Suppression tablosu snapshot'tan sonra degisse bile Meta
+gonderim rezervasyonu alinirken tekrar kontrol edilir.
 
-Meta WhatsApp Manager'da template'in ayni ad/dil ile `APPROVED` olmasi gerekir.
-`mabel_calisma_bilgisi_v2` Meta tarafindan su anda `MARKETING` (Pazarlama)
-kategorisinde siniflandirilmistir. API istemcisi bu kategoriyi Bilgilendirme olarak
-zorlayamaz; kisa aralikli tekrarlar Meta tarafindan kabul edilip sonradan teslim
-edilmeyebilir.
-Edge Function her `status` ve `send` isteginde WABA `message_templates` endpointinden
-durumu yeniden kontrol eder ve APPROVED degilse fail-closed davranarak gondermez.
-Token'in hem `whatsapp_business_management` (template sorgusu) hem de
-`whatsapp_business_messaging` (mesaj gonderimi) yetkisi olmalidir.
+Eski `mabel_reopening_2026_08_18_v2` serisi ve
+`mabel_calisma_bilgisi_v2`/`MARKETING` kampanya-log gecmisi yalniz audit icin
+korunur; yeni Edge runtime bu eski template veya seriye baglanmaz.
 
 ### Uygulama sirasi
 
@@ -103,8 +131,14 @@ Token'in hem `whatsapp_business_management` (template sorgusu) hem de
 2. Tekrar kullanilabilir turlar icin
    `supabase/migrations/20260817183915_add_reusable_announcement_rounds.sql`
    migration'ini uygula.
-3. Asagidaki Edge Function secret'larini ekle.
-4. Sonra `admin-session` ve `send-customer-announcement` function'larini deploy et.
+3. Suppression'in rezervasyon aninda tekrar kontrolu icin
+   `supabase/migrations/20260817185535_enforce_broadcast_suppressions_at_send.sql`
+   migration'ini uygula.
+4. Adres guncellemesi serisi ve sabit snapshot icin
+   `supabase/migrations/20260823033550_add_service_location_update_announcement.sql`
+   migration'ini uygula.
+5. Asagidaki Edge Function secret'larini ekle.
+6. Sonra `admin-session` ve `send-customer-announcement` function'larini deploy et.
 
 Migration; PIN brute-force rate limit tablosunu, lease tabanli kampanya kilidini ve
 mesaj gonderilmeden once alinan atomik kisi rezervasyonunu kurar. Ayrica telefon ve
@@ -134,8 +168,10 @@ ADMIN_LOGIN_WINDOW_SECONDS=900
 WHATSAPP_BROADCAST_BATCH_SIZE=5
 ```
 
-Local gelistirme gerekiyorsa `ADMIN_ALLOWED_ORIGINS` listesine acikca
-`http://localhost:5173` ekle. Admin yanitlari `Cache-Control: no-store` kullanir;
+Local gelistirme gerekiyorsa canli `.env` ile interaktif preview acmayin; frontend
+acilir acilmaz Supabase verisi okur/yazar. Ayrilmis local/staging Supabase projesi ve
+mock WhatsApp secret'lari kullanip, ancak o zaman `ADMIN_ALLOWED_ORIGINS` listesine
+acikca `http://localhost:5173` ekleyin. Admin yanitlari `Cache-Control: no-store` kullanir;
 oturum token'i yalniz `sessionStorage`/bellekte tutulmali ve cikista silinmelidir.
 
 ### Deploy
@@ -154,18 +190,18 @@ anahtari kullaniyor ve bu anahtar JWT degildir. Gateway JWT kontrolu kapali olsa
 endpointler acik degildir; `admin-session` server-side PIN + rate limit uygular,
 duyuru endpointi ise kisa omurlu `x-admin-session` HMAC tokenini zorunlu tutar.
 
-Migration calistigi anda alicilar server-side olarak
-`app_state.data.customerAccounts` ile `appointments` telefonlarinin birlesiminden
-uretilip yalniz bu kampanyaya ait `broadcast_recipients` snapshot tablosuna
-muhurlenir. Runtime Edge Function istemcinin yazabildigi bu iki kaynak tabloyu bir
-daha okumaz; sadece RLS acik ve PUBLIC/anon/authenticated yetkileri kaldirilmis sabit
-snapshot'i okur. E.164 benzeri 8-15 haneli telefonlar kabul edilir, normalize telefonla
-tekillestirilir ve hesap adi randevu adina tercih edilir. Bir customer account'ta
-`whatsappOptOut`, `marketingOptOut` veya `announcementOptOut` true ise (ya da
-`whatsappConsent`, `marketingConsent`, `receiveWhatsappAnnouncements` false ise)
-o telefon appointments tablosunda bulunsa da snapshot'a alinmaz. Mevcut veride acik
-riza/opt-out alani yoksa isletme duyuru onayi ve yasal dayanak surecini ayrica
-yonetmelidir; Edge Function bunu varsayamaz.
+Ilk tarihsel `mabel_reopening_2026_08_18_v2` seed snapshot'i olusturulurken alicilar
+server-side olarak `app_state.data.customerAccounts` ile `appointments` verilerinden
+bir kez uretilmisti. Yeni adres guncellemesi migration'i bu istemci-yazilabilir
+kaynaklara kesinlikle donmez. Yalniz RLS acik, PUBLIC/anon/authenticated yetkileri
+kaldirilmis eski frozen `broadcast_recipients` seed snapshot'ini kopyalar ve migration
+anindaki `broadcast_suppressions` telefonlarini cikarir. Eski campaign ve
+`message_logs` satirlarinda UPDATE/DELETE yapmaz. Runtime Edge Function da yalniz
+yeni sabit snapshot'i okur. Bu snapshot WhatsApp opt-in kaniti degildir: ilk kaynak
+eksik consent alanlarini varsayilan olarak dahil ediyordu ve appointment telefonlari
+icin pozitif opt-in sarti yoktu. Utility kategorisi de izin yerine gecmez. Gercek
+gonderimden once 157 alicinin her biri icin gecerli WhatsApp opt-in dogrulanmali;
+opt-out bildiren veya iznini geri cekenler `broadcast_suppressions` ile cikarilmalidir.
 
 Ayni campaign ID + normalize telefon icin `message_logs.dedupe_key` gonderimden once
 atomik olarak rezerve edilir. API yanitindaki `pending` henuz rezerve edilmemis ve

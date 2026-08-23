@@ -97,6 +97,7 @@ export type WhatsAppTemplateApproval = {
   language: string;
   status: string;
   category: string | null;
+  components: unknown[];
   checkedAt: string;
 };
 
@@ -124,7 +125,10 @@ export async function getTemplateApproval(
     `https://graph.facebook.com/${GRAPH_VERSION}/${businessAccountId}/message_templates`,
   );
   firstUrl.searchParams.set("name", templateName);
-  firstUrl.searchParams.set("fields", "name,status,language,category");
+  firstUrl.searchParams.set(
+    "fields",
+    "name,status,language,category,components",
+  );
   firstUrl.searchParams.set("limit", "100");
 
   let nextUrl: URL | null = firstUrl;
@@ -158,6 +162,9 @@ export async function getTemplateApproval(
         category: matchingTemplate.category
           ? String(matchingTemplate.category).toUpperCase()
           : null,
+        components: Array.isArray(matchingTemplate.components)
+          ? matchingTemplate.components
+          : [],
         checkedAt: new Date().toISOString(),
       };
     }
@@ -178,6 +185,7 @@ export async function getTemplateApproval(
     language: LANGUAGE_CODE,
     status: "NOT_FOUND",
     category: null,
+    components: [],
     checkedAt: new Date().toISOString(),
   };
 }

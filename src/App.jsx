@@ -6,7 +6,12 @@ const LS_KEY = "mabel_hair_art_clean_v1";
 const CUSTOMER_SESSION_KEY = "mabel_hair_art_customer_session_v1";
 const ADMIN_SESSION_KEY = "mabel_hair_art_admin_session_v1";
 const DEBT_CONTACT_PHONE = "05411731405";
-const ANNOUNCEMENT_DATE_LABEL = "19 Ağustos 2026";
+const ANNOUNCEMENT_TEMPLATE_NAME = "is_yeri_adres_guncellemesi";
+const ANNOUNCEMENT_TEMPLATE_CATEGORY = "UTILITY";
+const ANNOUNCEMENT_TEMPLATE_LANGUAGE = "tr";
+const ANNOUNCEMENT_TEMPLATE_HEADER = "Adres Bilgisi Güncellemesi";
+const ANNOUNCEMENT_ADDRESS = "Kültür, Hükümet Cd. No:54, 35800 Aliağa/İzmir";
+const ANNOUNCEMENT_MAPS_URL = "https://www.google.com/maps/search/?api=1&query=38.801010673611486%2C26.974653153176668";
 const MAX_UNPAID_DEBT_APPOINTMENTS = 1;
 const REMOTE_ERROR_LOG_INTERVAL = 60_000;
 const REMOTE_OK_POLL_INTERVAL = 5_000;
@@ -34,6 +39,8 @@ const EMPTY_ANNOUNCEMENT_STATUS = Object.freeze({
   template: "",
   templateStatus: "UNKNOWN",
   templateCategory: "UNKNOWN",
+  templateLanguage: "UNKNOWN",
+  templateEligible: false,
   recipientCount: 0,
   sent: 0,
   providerSent: 0,
@@ -55,6 +62,18 @@ function countValue(value, fallback = 0) {
   return Number.isFinite(parsed) ? Math.max(0, Math.trunc(parsed)) : fallback;
 }
 
+function isAnnouncementTemplateReady(status) {
+  return Boolean(
+    status
+    && status.template === ANNOUNCEMENT_TEMPLATE_NAME
+    && status.templateStatus === "APPROVED"
+    && status.templateCategory === ANNOUNCEMENT_TEMPLATE_CATEGORY
+    && status.templateLanguage === ANNOUNCEMENT_TEMPLATE_LANGUAGE
+    && status.templateEligible === true
+    && countValue(status.recipientCount) > 0
+  );
+}
+
 function normalizeAnnouncementStatus(payload, previous = EMPTY_ANNOUNCEMENT_STATUS) {
   const nestedStatus = payload?.status && typeof payload.status === "object" ? payload.status : null;
   const source = nestedStatus ? { ...payload, ...nestedStatus } : (payload || {});
@@ -74,6 +93,7 @@ function normalizeAnnouncementStatus(payload, previous = EMPTY_ANNOUNCEMENT_STAT
   const canStartNewRound = typeof source.canStartNewRound === "boolean"
     ? source.canStartNewRound
     : previous.canStartNewRound;
+  const templateEligible = typeof source.templateEligible === "boolean" ? source.templateEligible : false;
 
   return {
     campaign: source.campaign || previous.campaign || "",
@@ -84,6 +104,8 @@ function normalizeAnnouncementStatus(payload, previous = EMPTY_ANNOUNCEMENT_STAT
     template: source.template || previous.template || "",
     templateStatus: String(source.templateStatus || previous.templateStatus || "UNKNOWN").toUpperCase(),
     templateCategory: String(source.templateCategory || previous.templateCategory || "UNKNOWN").toUpperCase(),
+    templateLanguage: source.templateLanguage ? String(source.templateLanguage).toLowerCase() : "UNKNOWN",
+    templateEligible,
     recipientCount,
     sent,
     providerSent,
@@ -1029,6 +1051,7 @@ export default function MabelHairArt() {
   const [customerDetailReturnTab, setCustomerDetailReturnTab] = useState("customers");
   const [announcementStatus, setAnnouncementStatus] = useState(null);
   const [announcementLoading, setAnnouncementLoading] = useState(false);
+  const [announcementPreparing, setAnnouncementPreparing] = useState(false);
   const [announcementSending, setAnnouncementSending] = useState(false);
   const [announcementError, setAnnouncementError] = useState("");
   const announcementPollGenerationRef = useRef(0);
@@ -1322,7 +1345,7 @@ export default function MabelHairArt() {
         }
 
         setAdminSessionValidated(true);
-        const message = error.message || "Duyuru durumu alınamadı. Durumu yenileyip tekrar deneyin.";
+        const message = error.message || "Adres bilgilendirmesi durumu alınamadı. Durumu yenileyip tekrar deneyin.";
         setAnnouncementError(message);
         setNotice({ message, tone: "error" });
       })
@@ -1352,6 +1375,7 @@ export default function MabelHairArt() {
       .then((payload) => {
         if (!disposed && payload) {
           setAnnouncementStatus((current) => normalizeAnnouncementStatus(payload, current || EMPTY_ANNOUNCEMENT_STATUS));
+          setAnnouncementError("");
         }
       })
       .catch((error) => {
@@ -1363,7 +1387,7 @@ export default function MabelHairArt() {
           setNotice({ message: "Yönetici oturumunuzun süresi doldu. Lütfen yeniden giriş yapın.", tone: "error" });
           return;
         }
-        setAnnouncementError(error.message || "Duyuru durumu alınamadı. Durumu yenileyip tekrar deneyin.");
+        setAnnouncementError(error.message || "Adres bilgilendirmesi durumu alınamadı. Durumu yenileyip tekrar deneyin.");
       })
       .finally(() => {
         if (!disposed) setAnnouncementLoading(false);
@@ -1751,7 +1775,18 @@ export default function MabelHairArt() {
   });
 
   const announcementSummary = announcementStatus || EMPTY_ANNOUNCEMENT_STATUS;
-  const announcementTemplateApproved = announcementSummary.templateStatus === "APPROVED";
+  const announcementTemplateMatches = announcementSummary.template === ANNOUNCEMENT_TEMPLATE_NAME;
+  const announcementTemplateMetaApproved = announcementSummary.templateStatus === "APPROVED";
+  const announcementTemplateCategoryMatches = announcementSummary.templateCategory === ANNOUNCEMENT_TEMPLATE_CATEGORY;
+  const announcementTemplateLanguageMatches = announcementSummary.templateLanguage === ANNOUNCEMENT_TEMPLATE_LANGUAGE;
+  const announcementTemplateServerEligible = announcementSummary.templateEligible === true;
+  const announcementTemplateVerified = announcementTemplateMatches
+    && announcementTemplateMetaApproved
+    && announcementTemplateCategoryMatches
+    && announcementTemplateLanguageMatches
+    && announcementTemplateServerEligible;
+  const announcementHasRecipients = announcementSummary.recipientCount > 0;
+  const announcementTemplateReady = isAnnouncementTemplateReady(announcementStatus);
   const announcementProcessed = Math.min(
     announcementSummary.recipientCount,
     announcementSummary.sent + announcementSummary.failed + announcementSummary.processing
@@ -1761,17 +1796,44 @@ export default function MabelHairArt() {
     : 0;
   const announcementTemplateLabel = announcementLoading && !announcementStatus
     ? "Meta durumu kontrol ediliyor"
-    : announcementTemplateApproved
-      ? "Meta onaylı"
+    : !announcementStatus
+      ? "Meta durumu alınamadı"
+      : !announcementTemplateMatches
+        ? "Şablon eşleşmiyor"
       : announcementSummary.templateStatus === "PENDING"
         ? "Meta onayı bekleniyor"
         : announcementSummary.templateStatus === "REJECTED"
           ? "Meta tarafından reddedildi"
-          : "Meta durumu alınamadı";
+          : !announcementTemplateMetaApproved
+            ? "Meta onayı doğrulanamadı"
+            : !announcementTemplateCategoryMatches
+              ? "Bilgilendirme onayı yok"
+              : !announcementTemplateLanguageMatches
+                ? "Türkçe şablon doğrulanamadı"
+                : !announcementTemplateServerEligible
+                  ? "Sunucu şablonu uygun bulmadı"
+                  : "Meta onaylı · Bilgilendirme";
+  const announcementTemplateBlocker = !announcementStatus
+    ? "Gönderim için şablon durumu henüz sunucudan alınmadı. Durumu yenileyin."
+    : !announcementTemplateMatches
+      ? `Sunucu “${announcementSummary.template || "adı bilinmeyen"}” şablonunu bildirdi. Yalnızca “${ANNOUNCEMENT_TEMPLATE_NAME}” kullanılabilir.`
+      : !announcementTemplateMetaApproved
+        ? `Meta şablon durumu ${announcementSummary.templateStatus || "UNKNOWN"}. Gönderim için APPROVED olmalıdır.`
+        : !announcementTemplateCategoryMatches
+          ? `Meta şablon kategorisi ${ANNOUNCEMENT_TEMPLATE_CATEGORY_LABELS[announcementSummary.templateCategory] || announcementSummary.templateCategory || "Bilinmiyor"}. Gönderim yalnızca Bilgilendirme (UTILITY) kategorisinde açılır.`
+          : !announcementTemplateLanguageMatches
+            ? `Meta şablon dili ${announcementSummary.templateLanguage || "bilinmiyor"}. Gönderim yalnızca Türkçe (tr) şablonla açılır.`
+            : !announcementTemplateServerEligible
+              ? "Sunucu şablonu gönderime uygun olarak doğrulamadı (templateEligible=false). Gönderim kapalıdır."
+              : !announcementHasRecipients
+                ? "Gönderim listesinde engellenmemiş müşteri kaydı bulunamadı."
+                : "";
   const announcementRoundStateLabel = ANNOUNCEMENT_ROUND_STATE_LABELS[announcementSummary.campaignState] || "Durum bekleniyor";
-  const announcementActionDisabled = !announcementTemplateApproved
+  const announcementActionDisabled = !announcementTemplateReady
     || announcementLoading
+    || announcementPreparing
     || announcementSending
+    || Boolean(announcementError)
     || !announcementStatus
     || announcementSummary.locked
     || announcementSummary.processing > 0
@@ -1929,6 +1991,7 @@ export default function MabelHairArt() {
     setAnnouncementStatus(null);
     setAnnouncementError("");
     setAnnouncementLoading(false);
+    setAnnouncementPreparing(false);
     setAnnouncementSending(false);
   }
 
@@ -1958,15 +2021,87 @@ export default function MabelHairArt() {
         expireAdminSession();
         return null;
       }
-      if (!silent) setAnnouncementError(error.message || "Duyuru durumu alınamadı. Durumu yenileyip tekrar deneyin.");
+      if (!silent) setAnnouncementError(error.message || "Adres bilgilendirmesi durumu alınamadı. Durumu yenileyip tekrar deneyin.");
       return null;
     } finally {
       if (!silent) setAnnouncementLoading(false);
     }
   }
 
+  async function prepareCustomerAnnouncementRound() {
+    if (!adminSessionToken || announcementPreparing || announcementSending || announcementSendLockRef.current) return;
+    if (!isAnnouncementTemplateReady(announcementStatus) || !announcementSummary.canStartNewRound) {
+      alert("Yeni tur hazırlanamadı. Önce doğru Bilgilendirme şablonunun ve tamamlanmış turun güncel durumunu doğrulayın.", "warning");
+      return;
+    }
+    if (!globalThis.crypto?.randomUUID) {
+      alert("Tarayıcınız güvenli gönderim kimliği oluşturamıyor. Sayfayı güncelleyip tekrar deneyin.", "warning");
+      return;
+    }
+
+    announcementSendLockRef.current = true;
+    const generation = announcementPollGenerationRef.current + 1;
+    announcementPollGenerationRef.current = generation;
+    setAnnouncementPreparing(true);
+    setAnnouncementError("");
+
+    try {
+      const verificationPayload = await invokeAdminEdgeFunction("send-customer-announcement", {
+        token: adminSessionToken,
+        body: { action: "status" },
+      });
+      if (announcementPollGenerationRef.current !== generation) return;
+      const verifiedStatus = normalizeAnnouncementStatus(verificationPayload, announcementStatus || EMPTY_ANNOUNCEMENT_STATUS);
+      setAnnouncementStatus(verifiedStatus);
+
+      if (!isAnnouncementTemplateReady(verifiedStatus) || !verifiedStatus.canStartNewRound) {
+        throw new Error("Yeni tur öncesi şablon veya tamamlanmış tur doğrulaması başarısız oldu. Durumu yenileyip tekrar deneyin.");
+      }
+
+      const preparedPayload = await invokeAdminEdgeFunction("send-customer-announcement", {
+        token: adminSessionToken,
+        body: { action: "new-round", requestId: globalThis.crypto.randomUUID() },
+      });
+      if (announcementPollGenerationRef.current !== generation) return;
+      const preparedStatus = normalizeAnnouncementStatus(preparedPayload, verifiedStatus);
+      setAnnouncementStatus(preparedStatus);
+
+      if (!isAnnouncementTemplateReady(preparedStatus) || !preparedStatus.canSend || !preparedStatus.roundId || preparedStatus.canStartNewRound) {
+        throw new Error("Yeni tur hazırlandıktan sonra güvenli gönderim durumu doğrulanamadı. Mesaj gönderilmedi.");
+      }
+
+      alert([
+        `Tur ${preparedStatus.roundNumber} hazırlandı.`,
+        `Yeni turdaki alıcı kaydı: ${preparedStatus.pending}`,
+        "Henüz hiçbir mesaj gönderilmedi.",
+        "Gönderimi başlatmak için karttaki düğmeye tekrar basıp ikinci onayı verin.",
+      ].join("\n"), "success");
+    } catch (error) {
+      if (announcementPollGenerationRef.current !== generation) return;
+      if (error.status === 401 || error.status === 403) {
+        expireAdminSession();
+      } else {
+        const message = error.message || "Yeni adres bilgilendirme turu hazırlanamadı. Durumu yenileyip tekrar deneyin.";
+        setAnnouncementError(message);
+        alert(message, "error");
+      }
+    } finally {
+      announcementPollGenerationRef.current += 1;
+      announcementSendLockRef.current = false;
+      setAnnouncementPreparing(false);
+    }
+  }
+
   async function sendCustomerAnnouncement() {
-    if (!adminSessionToken || announcementSending || announcementSendLockRef.current) return;
+    if (!adminSessionToken || announcementPreparing || announcementSending || announcementSendLockRef.current) return;
+    if (!isAnnouncementTemplateReady(announcementStatus)) {
+      alert(`Gönderim durduruldu: yalnızca onaylı ${ANNOUNCEMENT_TEMPLATE_NAME} Bilgilendirme şablonu ve gönderim listesinde en az bir alıcı kaydı ile gönderim yapılabilir.`, "warning");
+      return;
+    }
+    if (announcementSummary.canStartNewRound) {
+      alert("Tamamlanmış turun ardından önce yeni turu hazırlayın. Tur hazırlandıktan sonra gönderim için ikinci onay ayrıca istenir.", "warning");
+      return;
+    }
     announcementSendLockRef.current = true;
     const generation = announcementPollGenerationRef.current + 1;
     announcementPollGenerationRef.current = generation;
@@ -1975,22 +2110,24 @@ export default function MabelHairArt() {
     let progressTimer = null;
 
     try {
-      let activeStatus = announcementStatus || EMPTY_ANNOUNCEMENT_STATUS;
-      if (activeStatus.canStartNewRound) {
-        if (!globalThis.crypto?.randomUUID) {
-          throw new Error("Tarayıcınız güvenli gönderim kimliği oluşturamıyor. Sayfayı güncelleyip tekrar deneyin.");
-        }
-        const preparedPayload = await invokeAdminEdgeFunction("send-customer-announcement", {
-          token: adminSessionToken,
-          body: { action: "new-round", requestId: globalThis.crypto.randomUUID() },
-        });
-        if (announcementPollGenerationRef.current !== generation) return;
-        activeStatus = normalizeAnnouncementStatus(preparedPayload, activeStatus);
-        setAnnouncementStatus(activeStatus);
+      const verificationPayload = await invokeAdminEdgeFunction("send-customer-announcement", {
+        token: adminSessionToken,
+        body: { action: "status" },
+      });
+      if (announcementPollGenerationRef.current !== generation) return;
+      const activeStatus = normalizeAnnouncementStatus(verificationPayload, announcementStatus || EMPTY_ANNOUNCEMENT_STATUS);
+      setAnnouncementStatus(activeStatus);
+
+      if (!isAnnouncementTemplateReady(activeStatus)) {
+        throw new Error("Gönderim öncesi kontrol başarısız: şablon adı, Meta APPROVED durumu, UTILITY kategorisi, Türkçe dil, sunucu uygunluğu ve alıcı sayısı birlikte doğrulanamadı.");
       }
 
-      if (!activeStatus.canSend || !activeStatus.roundId) {
-        throw new Error("Yeni gönderim turu hazırlanamadı. Durumu yenileyip tekrar deneyin.");
+      if (activeStatus.canStartNewRound) {
+        throw new Error("Yeni gönderim turu henüz hazırlanmadı. Mesaj gönderilmedi; önce yeni turu hazırlayın.");
+      }
+
+      if (!isAnnouncementTemplateReady(activeStatus) || !activeStatus.canSend || !activeStatus.roundId) {
+        throw new Error("Yeni gönderim turu onaylı Bilgilendirme şablonuyla doğrulanamadı. Durumu yenileyip tekrar deneyin.");
       }
 
       progressTimer = window.setTimeout(async function pollAnnouncementProgress() {
@@ -2022,7 +2159,7 @@ export default function MabelHairArt() {
         : `Tur ${nextStatus.roundNumber} tamamlandı.`;
       alert([
         resultTitle,
-        `Meta isteği kabul etti: ${nextStatus.sent}`,
+        `Meta API isteği kabul etti: ${nextStatus.sent}`,
         `Başarısız: ${nextStatus.failed}`,
         `İşleniyor/belirsiz: ${nextStatus.processing}`,
         `Kalan: ${nextStatus.pending}`,
@@ -2032,7 +2169,7 @@ export default function MabelHairArt() {
       if (error.status === 401 || error.status === 403) {
         expireAdminSession();
       } else {
-        const message = error.message || "Duyuru gönderilemedi. Durumu yenileyip tekrar deneyin.";
+        const message = error.message || "Adres bilgilendirmesi gönderilemedi. Durumu yenileyip tekrar deneyin.";
         setAnnouncementError(message);
         alert(message, "error");
       }
@@ -2045,8 +2182,36 @@ export default function MabelHairArt() {
   }
 
   function confirmCustomerAnnouncement() {
-    if (!announcementTemplateApproved) {
-      alert("Duyuru şablonu Meta tarafından onaylanmadan gönderim başlatılamaz.");
+    if (!announcementStatus) {
+      alert("Şablon durumu henüz alınmadı. Durumu yenileyip tekrar deneyin.");
+      return;
+    }
+    if (announcementError) {
+      alert("Son durum kontrolü başarısız olduğu için gönderim kapalıdır. Durumu yenileyip tekrar doğrulayın.", "warning");
+      return;
+    }
+    if (!announcementTemplateMatches) {
+      alert(`Gönderim durduruldu. Sunucunun bildirdiği şablon “${announcementSummary.template || "bilinmiyor"}”; beklenen şablon “${ANNOUNCEMENT_TEMPLATE_NAME}”.`, "warning");
+      return;
+    }
+    if (!announcementTemplateMetaApproved) {
+      alert(`${ANNOUNCEMENT_TEMPLATE_NAME} şablonu Meta tarafından APPROVED olmadan gönderim başlatılamaz.`);
+      return;
+    }
+    if (!announcementTemplateCategoryMatches) {
+      alert("Gönderim durduruldu. Bu ekran yalnızca Meta tarafından Bilgilendirme (UTILITY) olarak onaylanan şablonu gönderir.", "warning");
+      return;
+    }
+    if (!announcementTemplateLanguageMatches) {
+      alert("Gönderim durduruldu. Bu ekran yalnızca Türkçe (tr) Meta şablonunu gönderir.", "warning");
+      return;
+    }
+    if (!announcementTemplateServerEligible) {
+      alert("Gönderim durduruldu. Sunucu şablonu gönderime uygun olarak doğrulamadı (templateEligible=false).", "warning");
+      return;
+    }
+    if (!announcementHasRecipients) {
+      alert("Gönderim listesinde engellenmemiş müşteri kaydı bulunamadı.", "warning");
       return;
     }
     if (announcementSummary.locked) {
@@ -2059,20 +2224,17 @@ export default function MabelHairArt() {
     }
     if (announcementSummary.canStartNewRound) {
       const nextRound = Math.max(2, announcementSummary.roundNumber + 1);
-      const marketingRepeatWarning = announcementSummary.templateCategory === "MARKETING"
-        ? " Meta bu şablonu Pazarlama olarak sınıflandırıyor; kısa aralıklı tekrarları API'de kabul etse bile müşteriye teslim etmeyebilir."
-        : "";
       askConfirm({
-        title: `Duyuru Tur ${nextRound} ile tekrar gönderilsin mi?`,
-        message: `Tur ${announcementSummary.roundNumber} tamamlandı. Yeni Tur ${nextRound} oluşturulacak ve güncel izin kontrollerinden geçen en fazla ${announcementSummary.recipientCount} müşteriye ${ANNOUNCEMENT_DATE_LABEL} tarihli yeni adres duyurusu tekrar gönderilecek. Önceki turda gönderim istekleri Meta tarafından kabul edilen müşteriler için ikinci istek de oluşturulabilir.${marketingRepeatWarning} Bu işlem geri alınamaz.`,
-        confirmText: "Duyuruyu tekrar gönder",
+        title: `Adres bilgilendirmesi için Tur ${nextRound} hazırlansın mı?`,
+        message: `Tur ${announcementSummary.roundNumber} tamamlandı. Bu ilk onay yalnızca mevcut gönderim listesindeki, engellenmiş olarak işaretlenmemiş müşterilerle yeni Tur ${nextRound} kaydını hazırlar; hiçbir mesaj göndermez. Bu liste WhatsApp opt-in kanıtı değildir. Tur kartta hazır göründükten sonra gönderimi başlatmak için düğmeye tekrar basıp ikinci bir onay vermeniz gerekir. Adres: ${ANNOUNCEMENT_ADDRESS}.`,
+        confirmText: "Yeni turu hazırla",
         tone: "danger",
-        onConfirm: sendCustomerAnnouncement,
+        onConfirm: prepareCustomerAnnouncementRound,
       });
       return;
     }
     if (announcementSummary.pending <= 0) {
-      alert(announcementSummary.failed > 0 ? "Bu tur kısmi tamamlandı; başarısız kayıtlar aynı tur içinde güvenlik nedeniyle yeniden gönderilmeyecek." : `Bu turdaki ${announcementSummary.sent} müşteri için Meta isteği kabul etti. Bu sayı mesajın teslim edildiği anlamına gelmez.`, announcementSummary.failed > 0 ? "warning" : "success");
+      alert(announcementSummary.failed > 0 ? "Bu tur kısmi tamamlandı; başarısız kayıtlar aynı tur içinde güvenlik nedeniyle yeniden gönderilmeyecek." : `Bu turdaki ${announcementSummary.sent} müşteri için Meta API isteği kabul etti. Bu sayı mesajın teslim edildiği anlamına gelmez.`, announcementSummary.failed > 0 ? "warning" : "success");
       return;
     }
     if (!announcementSummary.canSend) {
@@ -2082,9 +2244,9 @@ export default function MabelHairArt() {
 
     const isRepeatRound = announcementSummary.roundNumber > 1;
     askConfirm({
-      title: isRepeatRound ? `Duyuru Tur ${announcementSummary.roundNumber} gönderilsin mi?` : "WhatsApp duyurusu gönderilsin mi?",
-      message: `${announcementSummary.pending} müşteriye ${ANNOUNCEMENT_DATE_LABEL} tarihli yeni adres duyurusu ${isRepeatRound ? "tekrar " : ""}gönderilecek. Aynı tur içinde müşteriye ikinci kez mesaj gönderilmez. Yalnızca WhatsApp üzerinden iletişim izni bulunan müşterilere gönderdiğinizi onaylıyorsunuz.`,
-      confirmText: `${announcementSummary.pending} müşteriye ${isRepeatRound ? "tekrar " : ""}gönder`,
+      title: isRepeatRound ? `Adres bilgilendirmesi Tur ${announcementSummary.roundNumber} gönderilsin mi?` : "WhatsApp adres bilgilendirmesi gönderilsin mi?",
+      message: `Gönderim listesindeki ${announcementSummary.pending} müşteriye iş yeri adresi ${isRepeatRound ? "tekrar " : ""}Bilgilendirme şablonuyla gönderilecek. Adres: ${ANNOUNCEMENT_ADDRESS}. Aynı tur içinde müşteriye ikinci kez mesaj gönderilmez. Bu onayı vererek listedeki her alıcının Mabel Hair Art'tan WhatsApp mesajı almak için geçerli ve açık opt-in izni verdiğini bizzat doğruladığınızı; mesaj istemeyenlerin, opt-out bildirenlerin ve iznini geri çekenlerin listeden çıkarıldığını beyan ediyorsunuz. Utility kategorisi izin yerine geçmez. “Meta API isteği kabul edildi” mesajın teslim edildiği anlamına gelmez.`,
+      confirmText: "Opt-in izinlerini doğruladım, gönder",
       tone: isRepeatRound ? "danger" : undefined,
       onConfirm: sendCustomerAnnouncement,
     });
@@ -3488,23 +3650,23 @@ export default function MabelHairArt() {
                         <Megaphone className="h-5 w-5" aria-hidden="true" />
                       </span>
                       <div className="min-w-0">
-                        <p className="text-xs font-black uppercase tracking-[0.16em] text-amber-200">WhatsApp toplu duyuru</p>
-                        <h3 id="customer-announcement-title" className="mt-1 text-xl font-black text-white">Yeni adres duyurusu</h3>
-                        <p className="mt-1 text-sm leading-6 text-zinc-400">Onaylı Meta şablonunu kayıtlı müşterilere güvenli ve ayrı gönderim turlarıyla gönderin.</p>
+                        <p className="text-xs font-black uppercase tracking-[0.16em] text-amber-200">WhatsApp toplu bilgilendirme</p>
+                        <h3 id="customer-announcement-title" className="mt-1 text-xl font-black text-white">İş yeri adresi güncellemesi</h3>
+                        <p className="mt-1 text-sm leading-6 text-zinc-400">Meta tarafından Bilgilendirme olarak onaylanan şablonu, gönderim listesindeki müşterilere ayrı gönderim turlarıyla iletin.</p>
                       </div>
                     </div>
                     <div className="flex items-center gap-2 self-start sm:self-center">
-                      <span className={`inline-flex min-h-9 items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-black ${announcementTemplateApproved ? "border-emerald-300/20 bg-emerald-400/10 text-emerald-200" : announcementLoading ? "border-white/10 bg-white/[0.05] text-zinc-300" : "border-amber-300/20 bg-amber-300/10 text-amber-100"}`} role="status" aria-live="polite">
-                        {announcementLoading ? <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" /> : announcementTemplateApproved ? <CircleCheck className="h-4 w-4" aria-hidden="true" /> : <CircleAlert className="h-4 w-4" aria-hidden="true" />}
+                      <span className={`inline-flex min-h-9 items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-black ${announcementTemplateVerified ? "border-emerald-300/20 bg-emerald-400/10 text-emerald-200" : announcementLoading ? "border-white/10 bg-white/[0.05] text-zinc-300" : "border-amber-300/20 bg-amber-300/10 text-amber-100"}`} role="status" aria-live="polite">
+                        {announcementLoading ? <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" /> : announcementTemplateVerified ? <CircleCheck className="h-4 w-4" aria-hidden="true" /> : <CircleAlert className="h-4 w-4" aria-hidden="true" />}
                         {announcementTemplateLabel}
                       </span>
                       <button
                         type="button"
                         onClick={() => refreshAnnouncementStatus()}
-                        disabled={announcementLoading || announcementSending}
+                        disabled={announcementLoading || announcementPreparing || announcementSending}
                         className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl border border-white/10 bg-black/30 text-zinc-300 transition hover:border-amber-300/30 hover:text-amber-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-300 disabled:cursor-not-allowed disabled:opacity-50"
-                        aria-label="Duyuru durumunu yenile"
-                        title="Duyuru durumunu yenile"
+                        aria-label="Adres bilgilendirmesi durumunu yenile"
+                        title="Adres bilgilendirmesi durumunu yenile"
                       >
                         <RefreshCw className={`h-4 w-4 ${announcementLoading ? "animate-spin motion-reduce:animate-none" : ""}`} aria-hidden="true" />
                       </button>
@@ -3515,20 +3677,32 @@ export default function MabelHairArt() {
                     <div className="min-w-0 rounded-2xl border border-white/10 bg-black/35 p-4 sm:p-5">
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <p className="text-sm font-black text-zinc-200">Mesaj önizlemesi</p>
-                        <span className="max-w-full truncate rounded-full bg-white/[0.06] px-3 py-1 font-mono text-[11px] text-zinc-400" title={announcementSummary.template || undefined}>
-                          {announcementSummary.template || "Şablon adı bekleniyor"}
+                        <span className="max-w-full truncate rounded-full bg-white/[0.06] px-3 py-1 font-mono text-[11px] text-zinc-400" title={ANNOUNCEMENT_TEMPLATE_NAME}>
+                          {ANNOUNCEMENT_TEMPLATE_NAME}
                         </span>
                       </div>
-                      <div className="mt-4 space-y-3 rounded-2xl border border-emerald-300/10 bg-emerald-950/20 p-4 text-sm leading-6 text-zinc-200">
-                        <p>Merhaba <span className="rounded-md bg-amber-300/15 px-1.5 py-0.5 font-mono font-bold text-amber-100" title="Müşteri adı değişkeni">{"{{1}}"}</span> 🌸</p>
-                        <p>Uzun bir aranın ardından Mabel Hair Art olarak yeniden hizmet vermeye başlıyorum.</p>
-                        <p>{ANNOUNCEMENT_DATE_LABEL} tarihinden itibaren <strong className="font-black text-white">yeni adresimde</strong> sizlerle olacağım.</p>
-                        <p>Randevu için: <strong className="font-black text-amber-100">mabelhairart.com.tr</strong></p>
-                        <p>Sizi yeniden görmek dileğiyle.</p>
-                        <p className="font-black text-white">Mabel Hair Art</p>
-                        <div className="flex items-start gap-2 rounded-xl border border-white/10 bg-black/25 p-3 text-xs leading-5 text-zinc-300">
-                          <MapPin className="mt-0.5 h-4 w-4 shrink-0 text-emerald-300" aria-hidden="true" />
-                          <span>Mesajdaki <strong className="text-emerald-200">Konumu Gör</strong> düğmesi müşteriyi yeni adresin harita konumuna yönlendirir.</span>
+                      <div className="mt-4 overflow-hidden rounded-2xl border border-emerald-300/10 bg-emerald-950/20 text-sm leading-6 text-zinc-200">
+                        <div className="border-b border-white/10 bg-black/20 px-4 py-3">
+                          <p className="text-[11px] font-black uppercase tracking-[0.14em] text-zinc-500">Başlık</p>
+                          <p className="mt-1 font-black text-white">{ANNOUNCEMENT_TEMPLATE_HEADER}</p>
+                        </div>
+                        <div className="space-y-3 p-4">
+                          <p>Mabel Hair Art iş yeri adresimiz değişmiştir.</p>
+                          <p>
+                            Güncel adresimiz:<br />
+                            <strong className="font-black text-white" title="Şablondaki {{1}} adres değişkeninin değeri">{ANNOUNCEMENT_ADDRESS}</strong>
+                          </p>
+                          <p>Güncel konum bilgisine aşağıdaki bağlantı üzerinden ulaşabilirsiniz.</p>
+                          <a
+                            href={ANNOUNCEMENT_MAPS_URL}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-emerald-300/20 bg-emerald-400/10 px-4 py-2.5 font-black text-emerald-200 transition hover:bg-emerald-400/15 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-300"
+                            aria-label="Yeni iş yeri konumunu Google Haritalar'da görüntüle"
+                          >
+                            <MapPin className="h-4 w-4 shrink-0" aria-hidden="true" />
+                            Konumu Görüntüle
+                          </a>
                         </div>
                       </div>
                     </div>
@@ -3539,16 +3713,25 @@ export default function MabelHairArt() {
                           <p className="text-sm font-black text-zinc-200">Meta işlem durumu</p>
                           <p className="mt-1 text-xs text-zinc-500">{announcementSummary.roundNumber > 0 ? `Tur ${announcementSummary.roundNumber} · ${announcementRoundStateLabel}` : "Gönderim turu sunucudan bekleniyor"}</p>
                         </div>
-                        {(announcementSending || announcementSummary.locked) && <span className="inline-flex items-center gap-2 text-xs font-bold text-amber-200"><Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />{announcementSending ? "İşleniyor" : "Kampanya kilitli"}</span>}
+                        {(announcementPreparing || announcementSending || announcementSummary.locked) && <span className="inline-flex items-center gap-2 text-xs font-bold text-amber-200"><Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />{announcementPreparing ? "Yeni tur hazırlanıyor" : announcementSending ? "İşleniyor" : "Kampanya kilitli"}</span>}
                       </div>
 
                       <div role="note" className="mt-4 flex items-start gap-2 rounded-xl border border-amber-300/20 bg-amber-300/10 p-3 text-xs font-semibold leading-5 text-amber-100">
                         <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
                         <span>
-                          <span className="font-mono text-amber-200">mabel_calisma_bilgisi_v2</span>{" "}
-                          Meta kategorisi: <strong>{ANNOUNCEMENT_TEMPLATE_CATEGORY_LABELS[announcementSummary.templateCategory] || "Bilinmiyor"}</strong>.
-                          {announcementSummary.templateCategory === "MARKETING" ? " Kısa aralıklarla yapılan tekrar gönderimlerini Meta bekletebilir veya teslim etmeyebilir." : ""}{" "}
-                          “Meta kabul etti” teslim edildi anlamına gelmez. Aşağıdaki teslimat durumları yalnız Meta’nın imzalı bildirimlerinden gelir.
+                          Beklenen şablon: <span className="font-mono text-amber-200">{ANNOUNCEMENT_TEMPLATE_NAME}</span>. Beklenen Meta kategorisi: <strong>Bilgilendirme (UTILITY)</strong>.{" "}
+                          Sunucu doğrulaması: <strong>{announcementTemplateServerEligible ? "uygun" : "uygun değil"}</strong> · Dil: <strong>{announcementSummary.templateLanguage === "UNKNOWN" ? "bilinmiyor" : announcementSummary.templateLanguage}</strong>.{" "}
+                          “Meta API isteği kabul etti” teslim edildi anlamına gelmez. Aşağıdaki teslimat durumları yalnız Meta’nın imzalı bildirimlerinden gelir.
+                        </span>
+                      </div>
+
+                      {announcementTemplateBlocker && !announcementLoading && <p role="alert" className="mt-3 rounded-xl border border-red-300/20 bg-red-400/10 p-3 text-xs font-semibold leading-5 text-red-200">{announcementTemplateBlocker}</p>}
+
+                      <div id="announcement-consent-note" role="note" className="mt-3 flex items-start gap-3 rounded-xl border border-blue-300/25 bg-blue-400/10 p-3 text-xs font-semibold leading-5 text-blue-100">
+                        <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-blue-200" aria-hidden="true" />
+                        <span>
+                          <strong className="block text-sm text-white">WhatsApp opt-in izni ayrıca doğrulanmalıdır.</strong>
+                          Utility / Bilgilendirme kategorisi müşteri izninin yerine geçmez. Bu ekrandaki alıcı sayısı opt-in kanıtı değildir. Yalnızca açıkça WhatsApp izni veren müşterilere mesaj gönderin; mesaj istemeyenleri, opt-out bildirenleri ve iznini geri çekenleri gönderimden önce hariç tutun.
                         </span>
                       </div>
 
@@ -3574,7 +3757,7 @@ export default function MabelHairArt() {
                       <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-5 xl:grid-cols-2">
                         {[
                           { label: "Toplam", value: announcementStatus ? announcementSummary.recipientCount : "—", tone: "text-white" },
-                          { label: "Meta kabul etti", value: announcementStatus ? announcementSummary.sent : "—", tone: "text-emerald-300" },
+                          { label: "API kabul etti", value: announcementStatus ? announcementSummary.sent : "—", tone: "text-emerald-300" },
                           { label: "Kalan", value: announcementStatus ? announcementSummary.pending : "—", tone: "text-amber-200" },
                           { label: "İşleniyor/Belirsiz", value: announcementStatus ? announcementSummary.processing : "—", tone: "text-blue-300" },
                           { label: "Başarısız", value: announcementStatus ? announcementSummary.failed : "—", tone: "text-red-300" },
@@ -3594,11 +3777,11 @@ export default function MabelHairArt() {
                         <div
                           className="h-2 overflow-hidden rounded-full bg-white/10"
                           role="progressbar"
-                          aria-label="Meta duyuru işlemi ilerlemesi"
+                          aria-label="Meta adres bilgilendirmesi işlemi ilerlemesi"
                           aria-valuemin={0}
                           aria-valuemax={100}
                           aria-valuenow={announcementProgress}
-                          aria-valuetext={announcementStatus ? `${announcementProcessed} / ${announcementSummary.recipientCount} kayıt işlendi; ${announcementSummary.processing} kaydın sonucu belirsiz` : "Duyuru durumu bekleniyor"}
+                          aria-valuetext={announcementStatus ? `${announcementProcessed} / ${announcementSummary.recipientCount} kayıt işlendi; ${announcementSummary.processing} kaydın sonucu belirsiz` : "Adres bilgilendirmesi durumu bekleniyor"}
                         >
                           <div className={`h-full w-full origin-left rounded-full bg-gradient-to-r from-amber-300 to-emerald-300 transition-transform duration-300 motion-reduce:transition-none ${announcementSending ? "animate-pulse motion-reduce:animate-none" : ""}`} style={{ transform: `scaleX(${announcementProgress / 100})` }} />
                         </div>
@@ -3611,32 +3794,42 @@ export default function MabelHairArt() {
                         type="button"
                         onClick={confirmCustomerAnnouncement}
                         disabled={announcementActionDisabled}
-                        aria-busy={announcementSending}
-                        aria-describedby="announcement-action-help"
+                        aria-busy={announcementPreparing || announcementSending}
+                        aria-describedby="announcement-consent-note announcement-action-help"
                         className="mt-4 inline-flex min-h-12 w-full items-center justify-center gap-2 rounded-2xl bg-amber-300 px-4 py-3 font-black text-black transition hover:bg-amber-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-300 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400 disabled:opacity-70"
                       >
-                        {announcementSending || announcementSummary.locked ? <Loader2 className="h-5 w-5 animate-spin motion-reduce:animate-none" aria-hidden="true" /> : announcementSummary.canStartNewRound ? <Send className="h-5 w-5" aria-hidden="true" /> : announcementSummary.pending <= 0 && announcementStatus ? <CircleCheck className="h-5 w-5" aria-hidden="true" /> : <Send className="h-5 w-5" aria-hidden="true" />}
-                        {announcementSending
+                        {announcementPreparing || announcementSending || announcementSummary.locked ? <Loader2 className="h-5 w-5 animate-spin motion-reduce:animate-none" aria-hidden="true" /> : announcementError ? <CircleAlert className="h-5 w-5" aria-hidden="true" /> : announcementSummary.canStartNewRound ? <Plus className="h-5 w-5" aria-hidden="true" /> : announcementSummary.pending <= 0 && announcementStatus ? <CircleCheck className="h-5 w-5" aria-hidden="true" /> : <Send className="h-5 w-5" aria-hidden="true" />}
+                        {announcementPreparing
+                          ? `Tur ${Math.max(2, announcementSummary.roundNumber + 1)} hazırlanıyor`
+                          : announcementSending
                           ? `Meta'ya iletiliyor · ${announcementSummary.sent}/${announcementSummary.recipientCount}`
                           : announcementSummary.locked
                             ? "Gönderim devam ediyor"
+                            : announcementError
+                              ? "Durumu yenileyin"
+                            : !announcementTemplateReady
+                              ? "Gönderim kullanılamıyor"
                             : announcementSummary.canStartNewRound
-                              ? "Duyuruyu tekrar gönder"
+                              ? "Yeni gönderim turunu hazırla"
                             : announcementSummary.pending <= 0 && announcementStatus
                               ? announcementSummary.failed > 0 || announcementSummary.processing > 0 ? "Kısmi tamamlandı" : "Meta işlemi tamamlandı"
                               : !announcementSummary.canSend && announcementStatus
                                 ? "Gönderim kullanılamıyor"
-                                : "Duyuruyu gönder"}
+                                : "Adres bilgisini gönder"}
                       </button>
                       <p id="announcement-action-help" className="mt-2 text-xs leading-5 text-zinc-500">
-                        {!announcementTemplateApproved
-                          ? "Ana gönderim eylemi yalnızca Meta şablon durumu APPROVED olduğunda açılır."
+                        {!announcementTemplateReady
+                          ? announcementTemplateBlocker || "Gönderim yalnızca doğru şablon Meta tarafından APPROVED ve UTILITY olarak doğrulandığında, gönderim listesinde en az bir alıcı kaydı varsa açılır."
+                          : announcementPreparing
+                            ? "Yeni tur hazırlanıyor. Bu aşamada hiçbir mesaj gönderilmez."
+                          : announcementError
+                            ? "Son durum kontrolü başarısız oldu. Gönderim kapalıdır; durumu yenileyip tekrar doğrulayın."
                           : announcementSummary.locked
                             ? "Başka bir güvenli gönderim çalışıyor; kampanya kilidi açılana kadar durum kontrol ediliyor."
                             : announcementSummary.processing > 0
-                              ? `${announcementSummary.processing} alıcının sonucu belirsiz; yeniden gönderilmez, durum kontrol ediliyor.${announcementSummary.pending > 0 ? ` Kalan ${announcementSummary.pending} alıcı yeni gönderime uygundur.` : ""}`
+                              ? `${announcementSummary.processing} alıcının sonucu belirsiz; yeniden gönderilmez, durum kontrol ediliyor.${announcementSummary.pending > 0 ? ` Gönderim listesinde ${announcementSummary.pending} alıcı bekliyor.` : ""}`
                               : announcementSummary.canStartNewRound
-                                ? `Tur ${announcementSummary.roundNumber} tamamlandı. Son onaydan sonra yeni tur oluşturulur ve uygun müşterilere duyuru tekrar gönderilir.`
+                                ? `Tur ${announcementSummary.roundNumber} tamamlandı. İlk onay yalnızca yeni turu hazırlar; hiçbir mesaj göndermez. Hazırlanan tur için gönderim düğmesine tekrar basıp ikinci onayı vermeniz gerekir.`
                               : announcementSummary.pending <= 0 && announcementStatus
                                 ? announcementSummary.failed > 0 ? "Kampanya kısmi tamamlandı; başarısız kayıtlar yeniden gönderilmez." : "Bu kampanyadaki tüm alıcılar işlendi."
                                 : !announcementSummary.canSend && announcementStatus

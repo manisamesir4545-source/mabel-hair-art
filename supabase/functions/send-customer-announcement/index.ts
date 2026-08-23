@@ -11,10 +11,20 @@ import {
   sendTemplateMessage,
   WhatsAppTemplateApproval,
 } from "../_shared/whatsapp.ts";
+import {
+  ANNOUNCEMENT_ADDRESS,
+  ANNOUNCEMENT_SERIES_ID,
+  ANNOUNCEMENT_TEMPLATE_CATEGORY,
+  ANNOUNCEMENT_TEMPLATE_LANGUAGE,
+  ANNOUNCEMENT_TEMPLATE_NAME,
+  evaluateAnnouncementTemplate,
+} from "./template-policy.ts";
 
-const SERIES_ID = "mabel_reopening_2026_08_18_v2";
-const TEMPLATE_NAME = "mabel_calisma_bilgisi_v2";
-const ANNOUNCEMENT_DATE = "19 Ağustos 2026";
+const SERIES_ID = ANNOUNCEMENT_SERIES_ID;
+const TEMPLATE_NAME = ANNOUNCEMENT_TEMPLATE_NAME;
+const TEMPLATE_LANGUAGE = ANNOUNCEMENT_TEMPLATE_LANGUAGE;
+const REQUIRED_TEMPLATE_CATEGORY = ANNOUNCEMENT_TEMPLATE_CATEGORY;
+const TEMPLATE_PARAMETERS = Object.freeze([ANNOUNCEMENT_ADDRESS]);
 const LEASE_SECONDS = 15 * 60;
 const MAX_BODY_LENGTH = 1024;
 const PAGE_SIZE = 1000;
@@ -24,7 +34,6 @@ type SupabaseAdmin = NonNullable<ReturnType<typeof getSupabaseAdmin>>;
 
 type Recipient = {
   phone: string;
-  name: string;
 };
 
 type RecipientData = {
@@ -140,15 +149,6 @@ function isValidPhone(phone: string) {
   return /^[1-9][0-9]{7,14}$/.test(phone);
 }
 
-function safeName(value: unknown) {
-  const withoutControls = [...String(value || "")].map((character) => {
-    const code = character.charCodeAt(0);
-    return code < 32 || code === 127 ? " " : character;
-  }).join("");
-  const name = withoutControls.replace(/\s+/g, " ").trim();
-  return (name || "Müşterimiz").slice(0, 80);
-}
-
 async function loadRecipients(
   supabase: SupabaseAdmin,
   roundId: string,
@@ -160,7 +160,7 @@ async function loadRecipients(
     const from = page * PAGE_SIZE;
     const { data, error } = await supabase
       .from("broadcast_recipients")
-      .select("phone, customer_name")
+      .select("phone")
       .eq("campaign_id", roundId)
       .order("phone", { ascending: true })
       .range(from, from + PAGE_SIZE - 1);
@@ -172,10 +172,7 @@ async function loadRecipients(
         invalidRecipientCount += 1;
         continue;
       }
-      recipients.set(phone, {
-        phone,
-        name: safeName(row.customer_name),
-      });
+      recipients.set(phone, { phone });
     }
     if (batch.length < PAGE_SIZE) {
       return {
@@ -316,6 +313,46 @@ function campaignSendable(campaign: CampaignRow | null) {
     ["idle", "running", "partial", "failed"].includes(campaign.state);
 }
 
+function isApprovedUtilityTemplate(
+  approval: WhatsAppTemplateApproval | null,
+) {
+  return evaluateAnnouncementTemplate(approval).eligible;
+}
+
+function templateEligibilityMessage(approval: WhatsAppTemplateApproval) {
+  const policy = evaluateAnnouncementTemplate(approval);
+  switch (policy.reason) {
+    case "name":
+      return "WhatsApp şablon adı beklenen adres güncelleme şablonuyla eşleşmiyor. Gönderim engellendi.";
+    case "status":
+      return "WhatsApp şablonu APPROVED durumunda değil. Gönderim engellendi.";
+    case "category":
+      return "WhatsApp şablonu UTILITY kategorisinde değil. Gönderim engellendi.";
+    case "language":
+      return "WhatsApp şablon dili tr değil. Gönderim engellendi.";
+    case "components":
+      return "WhatsApp şablon başlığı, gövdesi veya konum düğmesi beklenen içerikle eşleşmiyor. Gönderim engellendi.";
+    default:
+      return "";
+  }
+}
+
+function unavailableTemplateApproval(): WhatsAppTemplateApproval {
+  return {
+    name: TEMPLATE_NAME,
+    language: TEMPLATE_LANGUAGE,
+    status: "UNAVAILABLE",
+    category: null,
+    components: [],
+    checkedAt: new Date().toISOString(),
+  };
+}
+
+function templatePolicyDriftError() {
+  const error = new Error("Broadcast template policy changed during send");
+  return Object.assign(error, { code: "TEMPLATE_POLICY_DRIFT" });
+}
+
 function statusPayload(
   summary: CampaignSummary,
   recipientData: RecipientData,
@@ -324,6 +361,7 @@ function statusPayload(
   delivery: DeliverySummary | null = null,
 ) {
   const templateStatus = approval?.status || "UNAVAILABLE";
+  const templateEligible = isApprovedUtilityTemplate(approval);
   const locked = campaignLocked(campaign);
   const roundId = campaign?.campaign_id || "";
   const completed = campaign?.state === "completed";
@@ -338,6 +376,9 @@ function statusPayload(
     templateStatus,
     templateCategory: approval?.category || null,
     templateLanguage: approval?.language || null,
+    templateEligible,
+    requiredTemplateCategory: REQUIRED_TEMPLATE_CATEGORY,
+    requiredTemplateLanguage: TEMPLATE_LANGUAGE,
     templateCheckedAt: approval?.checkedAt || null,
     recipientCount: summary.recipientCount,
     invalidRecipientCount: recipientData.invalidRecipientCount,
@@ -354,9 +395,9 @@ function statusPayload(
     processing: summary.processing,
     campaignState: campaign?.state || "idle",
     locked,
-    canSend: templateStatus === "APPROVED" && summary.pending > 0 && !locked &&
+    canSend: templateEligible && summary.pending > 0 && !locked &&
       !completed && campaignSendable(campaign),
-    canStartNewRound: templateStatus === "APPROVED" &&
+    canStartNewRound: templateEligible &&
       summary.recipientCount > 0 && summary.pending === 0 &&
       summary.processing === 0 && !locked && campaignTerminal(campaign),
   };
@@ -370,7 +411,7 @@ async function prepareRound(
     p_series_id: SERIES_ID,
     p_request_id: requestId,
     p_template_name: TEMPLATE_NAME,
-    p_template_parameters: ["customer_name", ANNOUNCEMENT_DATE],
+    p_template_parameters: Array.from(TEMPLATE_PARAMETERS),
   });
   if (error) throw error;
 
@@ -435,7 +476,7 @@ async function processRecipient(
     const providerResponse = await sendTemplateMessage(
       recipient.phone,
       TEMPLATE_NAME,
-      [recipient.name, ANNOUNCEMENT_DATE],
+      Array.from(TEMPLATE_PARAMETERS),
     );
     return await finalizeMessage(
         supabase,
@@ -609,6 +650,11 @@ Deno.serve(async (req) => {
           template: TEMPLATE_NAME,
           templateName: TEMPLATE_NAME,
           templateStatus: "UNAVAILABLE",
+          templateCategory: null,
+          templateLanguage: null,
+          templateEligible: false,
+          requiredTemplateCategory: REQUIRED_TEMPLATE_CATEGORY,
+          requiredTemplateLanguage: TEMPLATE_LANGUAGE,
         };
       return adminJson(req, {
         ok: false,
@@ -628,7 +674,7 @@ Deno.serve(async (req) => {
         )
         : null;
 
-      if (approval.status !== "APPROVED") {
+      if (!isApprovedUtilityTemplate(approval)) {
         return adminJson(req, {
           ok: false,
           ...(currentStatus || {
@@ -638,9 +684,13 @@ Deno.serve(async (req) => {
             template: TEMPLATE_NAME,
             templateName: TEMPLATE_NAME,
             templateStatus: approval.status,
+            templateCategory: approval.category,
+            templateLanguage: approval.language,
+            templateEligible: false,
+            requiredTemplateCategory: REQUIRED_TEMPLATE_CATEGORY,
+            requiredTemplateLanguage: TEMPLATE_LANGUAGE,
           }),
-          message:
-            "WhatsApp şablonu APPROVED durumunda değil. Yeni gönderim turu hazırlanmadı.",
+          message: templateEligibilityMessage(approval),
         }, 409);
       }
 
@@ -717,7 +767,13 @@ Deno.serve(async (req) => {
       delivery,
     );
     if (body.action === "status") {
-      return adminJson(req, { ok: true, ...currentStatus });
+      return adminJson(req, {
+        ok: true,
+        ...currentStatus,
+        message: isApprovedUtilityTemplate(approval)
+          ? undefined
+          : templateEligibilityMessage(approval),
+      });
     }
 
     const roundId = body.roundId;
@@ -729,12 +785,11 @@ Deno.serve(async (req) => {
           "İstenen gönderim turu güncel değil. Durumu yenileyip tekrar onaylayın.",
       }, 409);
     }
-    if (approval.status !== "APPROVED") {
+    if (!isApprovedUtilityTemplate(approval)) {
       return adminJson(req, {
         ok: false,
         ...currentStatus,
-        message:
-          "WhatsApp şablonu APPROVED durumunda değil. Gönderim yapılmadı.",
+        message: templateEligibilityMessage(approval),
       }, 409);
     }
     if (campaign.state === "completed") {
@@ -790,13 +845,48 @@ Deno.serve(async (req) => {
       }, 409);
     }
 
+    diagnosticStage = "preclaim_template_approval";
+    try {
+      approval = await getTemplateApproval(TEMPLATE_NAME);
+    } catch (error) {
+      console.error("announcement preclaim template status failed", {
+        action,
+        ...safeDiagnostic(error),
+      });
+      return adminJson(req, {
+        ok: false,
+        ...statusPayload(
+          summary,
+          recipientData,
+          null,
+          campaign,
+          delivery,
+        ),
+        message:
+          "WhatsApp şablon durumu gönderimden hemen önce doğrulanamadı. Hiçbir mesaj gönderilmedi.",
+      }, 502);
+    }
+    if (!isApprovedUtilityTemplate(approval)) {
+      return adminJson(req, {
+        ok: false,
+        ...statusPayload(
+          summary,
+          recipientData,
+          approval,
+          campaign,
+          delivery,
+        ),
+        message: templateEligibilityMessage(approval),
+      }, 409);
+    }
+
     diagnosticStage = "claim_campaign";
     const { data: claimData, error: claimError } = await supabase.rpc(
       "claim_broadcast_campaign",
       {
         p_campaign_id: roundId,
         p_template_name: TEMPLATE_NAME,
-        p_template_parameters: ["customer_name", ANNOUNCEMENT_DATE],
+        p_template_parameters: Array.from(TEMPLATE_PARAMETERS),
         p_recipient_count: recipientData.recipients.length,
         p_lease_seconds: LEASE_SECONDS,
       },
@@ -847,6 +937,16 @@ Deno.serve(async (req) => {
         index < recipientData.recipients.length;
         index += batchSize
       ) {
+        try {
+          approval = await getTemplateApproval(TEMPLATE_NAME);
+        } catch (error) {
+          approval = unavailableTemplateApproval();
+          throw error;
+        }
+        if (!isApprovedUtilityTemplate(approval)) {
+          throw templatePolicyDriftError();
+        }
+
         const { data: renewed, error: renewError } = await supabase.rpc(
           "renew_broadcast_campaign",
           {
@@ -906,10 +1006,13 @@ Deno.serve(async (req) => {
           : "Duyuru gönderimi tamamlandı.",
       });
     } catch (error) {
+      const sendDiagnostic = safeDiagnostic(error);
+      const templatePolicyDrift =
+        sendDiagnostic.code === "TEMPLATE_POLICY_DRIFT";
       console.error("announcement send failed", {
         action,
         stage: "process_recipients",
-        ...safeDiagnostic(error),
+        ...sendDiagnostic,
       });
       const failedSummary = await campaignSummary(
         supabase,
@@ -922,7 +1025,9 @@ Deno.serve(async (req) => {
         runToken,
         failedSummary,
         skipped,
-        "Broadcast processing failed",
+        templatePolicyDrift
+          ? "Broadcast template policy changed"
+          : "Broadcast processing failed",
       ).catch(() => false);
       const failedCampaign = await loadCampaign(supabase, roundId).catch(() =>
         campaign
@@ -939,9 +1044,10 @@ Deno.serve(async (req) => {
           failedDelivery,
         ),
         skipped,
-        message:
-          "Duyuru işlemi güvenli biçimde durduruldu. Gönderilmiş alıcılara yeniden gönderim yapılmaz.",
-      }, 500);
+        message: templatePolicyDrift
+          ? "WhatsApp şablon içeriği, dili, kategorisi veya onay durumu değişti. Gönderim güvenli biçimde durduruldu; kalan alıcılara mesaj gönderilmedi."
+          : "Duyuru işlemi güvenli biçimde durduruldu. Gönderilmiş alıcılara yeniden gönderim yapılmaz.",
+      }, templatePolicyDrift ? 409 : 500);
     }
   } catch (error) {
     const diagnostic = safeDiagnostic(error);
